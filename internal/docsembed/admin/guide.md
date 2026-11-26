@@ -2819,6 +2819,23 @@ no path), `nos_token_file`, `nos_ca_file` (optional, a pinned CA),
 0600 and owned by `nebula-ops-agent`). Unknown keys are an error. The
 configuration holds no secret itself.
 
+- **Token:** create it only with `nebula-server -api-token` (see "The
+  token `ops-agent`"). The command draws a random token, prints it once
+  and prints the `server.json` entry, which holds only its SHA-256. Do
+  not invent a token or reuse one from another client.
+- **`nos_base_url`:** the agent runs on the NOS host, so use plain `http`
+  to a loopback IP literal, for example `http://127.0.0.1:8080`. The
+  agent accepts `http` only when the host is a loopback IP. It refuses a
+  host name such as `localhost`, and any path other than `/`.
+- **LLM over plain `http`:** if the LLM base URL in the settings uses
+  `http` (with `allow_plain_http`), leave out `llm_credential_file`. The
+  agent refuses to send a credential over plain `http`: every run that
+  has work then ends with `llm_error` before its first LLM call.
+- **A run without findings still writes a note:** the fleet summary is
+  due once per UTC day, also with all counts at zero. So an enabled agent
+  calls the LLM and writes a summary note every day even when nothing is
+  open. A change of the counts during the day makes a new summary due.
+
 Three units ship. None is enabled by the package:
 
 | Unit | What it does | Enable |
