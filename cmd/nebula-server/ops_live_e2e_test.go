@@ -18,13 +18,17 @@ package main
 // admits a request with the session cookie only), the operations service (no
 // executor here; any call into it panics and fails the test), the container
 // preview and the listener facts are the fixtures of ops_test.go, and the
-// host list is one inventory host. These are the stores and services outside
-// this path; the path itself runs unchanged.
+// host list is one inventory host, and the notifier the suggestions send
+// through is a recorder (opsLiveSink). These are the stores and services outside
+// this path. The ops API's accepted-note hook and the suggestion worker are the
+// production ones (wireOpsSuggestions, acceptedHook); the path itself runs
+// unchanged.
 
 import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -32,6 +36,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,9 +46,11 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsfacts"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsnotes"
+	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
@@ -151,14 +158,16 @@ func (l *opsLiveLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch name {
 	case "ops_fix":
 		label, _ := opsfacts.Label(opsLiveAction)
-		if !strings.Contains(prompt, "c1: "+label) {
+		// The candidate line is "Kandidat c1: <label>" or "Candidate c1: <label>"
+		// (the prompt language); the citation line is "[d1] <text>".
+		if !opsLiveLineRe(`^(Kandidat|Candidate) c1: ` + regexp.QuoteMeta(label)).MatchString(prompt) {
 			l.t.Errorf("LLM: fix prompt lacks the candidate line c1 with label %q", label)
 		}
 		if !strings.Contains(prompt, opsLiveHost) || !strings.Contains(prompt, opsLiveCVE) {
 			l.t.Errorf("LLM: fix prompt lacks the host or the vulnerability ID")
 		}
-		if !strings.Contains(prompt, "d1") {
-			l.t.Errorf("LLM: fix prompt lacks the documentation key d1")
+		if !opsLiveLineRe(`^\[d1\] `).MatchString(prompt) {
+			l.t.Errorf("LLM: fix prompt lacks the documentation line for key d1")
 		}
 		content = opsLiveFix
 	case "ops_summary":
@@ -173,7 +182,9 @@ func (l *opsLiveLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"message": map[string]any{"role": "assistant", "content": content},
 	}}})
 	if err != nil {
-		l.t.Fatal(err)
+		l.t.Errorf("LLM: marshal the reply: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(body)
@@ -311,6 +322,143 @@ func opsLiveRunAgent(t *testing.T, bin, cfgFile string) string {
 	return string(out)
 }
 
+// opsLiveLineRe compiles a pattern that must match at the start of a line of the
+// prompt (multi-line mode).
+func opsLiveLineRe(pattern string) *regexp.Regexp {
+	return regexp.MustCompile("(?m)" + pattern)
+}
+
+// opsLiveInputTag matches one input element of the rendered form. No attribute
+// value of the form contains '>', so the first '>' ends the element.
+var opsLiveInputTag = regexp.MustCompile(`<input\b[^>]*>`)
+
+// opsLiveAttrRe matches one attribute of an element: a name after a space and
+// an optional double quoted value. A quoted value is consumed as a whole, so a
+// word inside a value is never read as an attribute.
+var opsLiveAttrRe = regexp.MustCompile(`\s([a-zA-Z][a-zA-Z-]*)(?:="([^"]*)")?`)
+
+// opsLiveAttrs returns the attributes of one element; a boolean attribute maps
+// to the empty value and is present as a key.
+func opsLiveAttrs(tag string) map[string]string {
+	m := map[string]string{}
+	for _, a := range opsLiveAttrRe.FindAllStringSubmatch(tag, -1) {
+		m[a[1]] = a[2]
+	}
+	return m
+}
+
+// opsLiveCheckForm checks the prefilled operation form. The radio of action is
+// the only checked action radio, and the checkbox of host is the only checked
+// host box and is not disabled. Each input element is parsed on its own, so the
+// attribute order does not matter.
+func opsLiveCheckForm(form, action, host string) error {
+	var actionsChecked, hostsChecked []string
+	for _, tag := range opsLiveInputTag.FindAllString(form, -1) {
+		attrs := opsLiveAttrs(tag)
+		_, checked := attrs["checked"]
+		if !checked {
+			continue
+		}
+		switch {
+		case attrs["type"] == "radio" && attrs["name"] == "action":
+			actionsChecked = append(actionsChecked, attrs["value"])
+		case attrs["type"] == "checkbox" && attrs["name"] == "host":
+			if _, disabled := attrs["disabled"]; disabled {
+				return fmt.Errorf("host %q is checked but disabled", attrs["value"])
+			}
+			hostsChecked = append(hostsChecked, attrs["value"])
+		}
+	}
+	if len(actionsChecked) != 1 || actionsChecked[0] != action {
+		return fmt.Errorf("checked action radios %q, want exactly %q", actionsChecked, action)
+	}
+	if len(hostsChecked) != 1 || hostsChecked[0] != host {
+		return fmt.Errorf("checked host boxes %q, want exactly %q", hostsChecked, host)
+	}
+	return nil
+}
+
+// opsLiveWrongPrefill runs opsLiveCheckForm on the real form with the prefill
+// changed in the ways a regression would change it. Each change must make the
+// check fail, and a reordered attribute list must still pass.
+func opsLiveWrongPrefill(t *testing.T, form string) {
+	t.Helper()
+	radio := `<input type="radio" name="action" value="` + opsLiveAction + `" checked>`
+	hostChecked := `name="host" value="` + opsLiveHost + `" checked`
+	cases := []struct {
+		name    string
+		mutate  func(string) string
+		wantErr bool
+	}{
+		{"action not checked", func(f string) string {
+			return strings.Replace(f, radio, `<input type="radio" name="action" value="`+opsLiveAction+`">`, 1)
+		}, true},
+		{"other action checked", func(f string) string {
+			return strings.Replace(f, radio, `<input type="radio" name="action" value="`+opsLiveAction+`">`, 1) +
+				`<input type="radio" name="action" value="package.reboot" checked>`
+		}, true},
+		{"host not checked", func(f string) string {
+			return strings.Replace(f, hostChecked, `name="host" value="`+opsLiveHost+`"`, 1)
+		}, true},
+		{"host checked but disabled", func(f string) string {
+			return strings.Replace(f, hostChecked, `name="host" value="`+opsLiveHost+`" disabled checked`, 1)
+		}, true},
+		{"attributes reordered", func(f string) string {
+			return strings.Replace(f, radio, `<input checked type="radio" name="action" value="`+opsLiveAction+`">`, 1)
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mutated := tc.mutate(form)
+			if mutated == form {
+				t.Fatalf("the change did not apply to the rendered form; markup changed?")
+			}
+			err := opsLiveCheckForm(mutated, opsLiveAction, opsLiveHost)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("opsLiveCheckForm = %v, want error %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// opsLiveSink is the notifier as the suggestions see it. It records the
+// suggestions and sends nothing; the notifier's limit and digest are not part
+// of this path. The episodes start empty, so forgetting has nothing to do.
+type opsLiveSink struct {
+	mu   sync.Mutex
+	keys []string
+	sent chan notify.Event
+}
+
+// Suggestion records the episode key and hands the event to the test.
+func (s *opsLiveSink) Suggestion(_ context.Context, key string, e notify.Event) int {
+	s.mu.Lock()
+	s.keys = append(s.keys, key)
+	s.mu.Unlock()
+	select {
+	case s.sent <- e:
+	default:
+	}
+	return 1
+}
+
+// SuggestionKeys returns the recorded episode keys.
+func (s *opsLiveSink) SuggestionKeys() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.keys...)
+}
+
+// RestoreSuggestions is not used: the test starts without saved episodes.
+func (s *opsLiveSink) RestoreSuggestions([]string) {}
+
+// ForgetSuggestions is not used: the test has no episodes to end.
+func (s *opsLiveSink) ForgetSuggestions([]string) {}
+
+// opsLiveHookTimeout bounds the wait for the suggestion after the fix note is
+// accepted; the worker handles accepted notes in the background.
+const opsLiveHookTimeout = 10 * time.Second
+
 // TestOpsAgentEndToEndWithoutNetwork runs the whole path on loopback: a stored
 // critical finding becomes a fix note by the agent binary, the Ops tab shows
 // the suggestion card, and the card's link opens the prefilled operation form.
@@ -357,7 +505,24 @@ func TestOpsAgentEndToEndWithoutNetwork(t *testing.T) {
 		Name: serverconfig.DefaultOpsTokenName, SHA256: api.HashToken(opsLiveAgentTok),
 		Scopes:          []string{serverconfig.ScopeOpsRead, serverconfig.ScopeOpsNotesWrite},
 		SourceAddresses: []string{"127.0.0.1"}}}}
-	oh, err := newOpsAPI(cfg, env.db, notes, hosts, log, nil, srcs)
+	// The suggestions of the server: the production worker and accepted-note hook
+	// (ADR 0016 D10) on the settings row above; the notifier is the recorder.
+	sink := &opsLiveSink{sent: make(chan notify.Event, 4)}
+	sugg, err := wireOpsSuggestions(env.db, dataDir, opsLiveOrigin, sink, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerCtx, stopWorker := context.WithCancel(ctx)
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		sugg.Run(workerCtx)
+	}()
+	t.Cleanup(func() {
+		stopWorker()
+		<-workerDone
+	})
+	oh, err := newOpsAPI(cfg, env.db, notes, hosts, log, sugg.acceptedHook(), srcs)
 	if err != nil || oh == nil {
 		t.Fatalf("newOpsAPI = %v, %v", oh, err)
 	}
@@ -366,8 +531,13 @@ func TestOpsAgentEndToEndWithoutNetwork(t *testing.T) {
 	// admin rule of the server, and the session user of the tab.
 	isAdmin := func(context.Context) bool { return true }
 	runs := &opsRunHolder{}
+	// web01 is enrolled (an unblocked host key pin): the form checks only usable
+	// hosts, so an unenrolled web01 would open with its box unchecked.
+	pins := func(context.Context) ([]*pb.HostKeyPin, error) {
+		return []*pb.HostKeyPin{{HostId: opsLiveHost, Fingerprint: "SHA256:ops-live-" + opsLiveHost}}, nil
+	}
 	uiOpts := withOperationSuggestions(ui.Options{PublicOrigin: opsLiveOrigin, Log: log, Hosts: hosts,
-		Operations: opsLiveNoOps{}}, notes, isAdmin)
+		HostKeys: pins, Operations: opsLiveNoOps{}}, notes, isAdmin)
 	uiOpts, err = applyOpsAssistant(uiOpts, cfg, func() (opsAssistantWiring, error) {
 		w, err := wireOpsAssistant(env.db, notes, isAdmin, srcs, hosts, runs, func() bool { return true }, log)
 		w.user = func(*http.Request) (string, bool) { return "alice", true }
@@ -428,9 +598,10 @@ func TestOpsAgentEndToEndWithoutNetwork(t *testing.T) {
 	}
 	fixCalls := llm.count("ops_fix")
 	firstTotal := llm.total()
-	// The run may also answer the day's summary: one more call, never more.
-	if got := llm.count("ops_summary"); got > 1 || firstTotal != fixCalls+got {
-		t.Fatalf("first run: %d summary calls, %d calls in total; want at most one summary", got, firstTotal)
+	// The ops API always offers the day's summary item, so the first run makes
+	// exactly one summary call besides the fix call.
+	if got := llm.count("ops_summary"); got != 1 || firstTotal != fixCalls+got {
+		t.Fatalf("first run: %d summary calls, %d calls in total; want exactly one summary and no other call", got, firstTotal)
 	}
 
 	all, err := notes.List(ctx)
@@ -453,6 +624,22 @@ func TestOpsAgentEndToEndWithoutNetwork(t *testing.T) {
 	st, ok := runs.last()
 	if !ok || st.LLMCalls < 1 {
 		t.Fatalf("status of the run not reported: %+v, %v", st, ok)
+	}
+
+	// The accepted fix note (critical tier) makes the worker send one suggestion
+	// for web01; the event is the notifier's, the episode key is recorded.
+	select {
+	case ev := <-sink.sent:
+		// The host and the text are inside the notifier's template (not readable
+		// here); the kind is the contract the Ops tab's suggestion relies on.
+		if ev.Kind != notify.KindOpsSuggestion {
+			t.Fatalf("suggestion event kind %q, want %q", ev.Kind, notify.KindOpsSuggestion)
+		}
+	case <-time.After(opsLiveHookTimeout):
+		t.Fatalf("no suggestion sent within %s after the accepted fix note", opsLiveHookTimeout)
+	}
+	if got := len(sink.SuggestionKeys()); got != 1 {
+		t.Fatalf("suggestion episodes after the first run: %d, want 1", got)
 	}
 
 	// The Ops tab shows the card with host, step and the link to the form.
@@ -490,12 +677,15 @@ func TestOpsAgentEndToEndWithoutNetwork(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("GET /operations/new?suggestion=%s as admin: %d", ref, code)
 	}
-	for _, want := range []string{"Opened from an agent suggestion", `name="suggestion" value="` + ref + `"`,
-		opsLiveAction} {
+	for _, want := range []string{"Opened from an agent suggestion", `name="suggestion" value="` + ref + `"`} {
 		if !strings.Contains(form, want) {
 			t.Fatalf("suggestion form lacks %q", want)
 		}
 	}
+	if err := opsLiveCheckForm(form, opsLiveAction, opsLiveHost); err != nil {
+		t.Fatalf("prefilled form: %v", err)
+	}
+	opsLiveWrongPrefill(t, form)
 
 	// The agent token reaches none of the pages.
 	for _, path := range []string{"/assistant/ops", "/operations/new?suggestion=" + ref} {
@@ -516,8 +706,8 @@ func TestOpsAgentEndToEndWithoutNetwork(t *testing.T) {
 		}
 	}
 
-	// Second run: the group's digest is answered, so the group makes no call. The
-	// summary of the day may stay answered too, so only the fix count is fixed.
+	// Second run: the group's digest and the day's summary are both answered by
+	// the first run, so the run makes no LLM call at all.
 	opsLiveRunAgent(t, bin, cfgFile)
 	if got := llm.count("ops_fix"); got != fixCalls {
 		t.Fatalf("second run: %d fix calls, want %d (digest answered)", got, fixCalls)
