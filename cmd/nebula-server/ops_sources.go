@@ -30,6 +30,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsfacts"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/trafficingest"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
@@ -84,6 +85,7 @@ type opsVulnFindings struct {
 	store    vulnFindingReader
 	previews vulnfix.PreviewSource
 	newFixes func(vulnfix.PreviewSource) fixDecider
+	crit     *vulnTierer // the host criticality of the scores (vuln_tier.go)
 }
 
 var _ opsfacts.FindingSource = opsVulnFindings{}
@@ -91,13 +93,54 @@ var _ opsfacts.FindingSource = opsVulnFindings{}
 // newOpsVulnFindings returns the finding source over store, with the container
 // previews of image findings and one fix decider per Findings call from
 // newFixes (given the preview source it must read through). All three are
-// required; a missing one fails closed as opsfacts.ErrNoSource.
+// required; a missing one fails closed as opsfacts.ErrNoSource. The scores use
+// no host criticality (every subject is unset); see newOpsVulnFindingsWith.
 func newOpsVulnFindings(store vulnFindingReader, previews vulnfix.PreviewSource,
 	newFixes func(vulnfix.PreviewSource) fixDecider) (opsVulnFindings, error) {
+	return newOpsVulnFindingsWith(store, previews, newFixes, nil)
+}
+
+// newOpsVulnFindingsWith is newOpsVulnFindings with the host criticality of the
+// scores from crit, the tierer of the vulnerability pages. A nil crit means no
+// inventory: every subject is unset.
+func newOpsVulnFindingsWith(store vulnFindingReader, previews vulnfix.PreviewSource,
+	newFixes func(vulnfix.PreviewSource) fixDecider, crit *vulnTierer) (opsVulnFindings, error) {
 	if store == nil || previews == nil || newFixes == nil {
 		return opsVulnFindings{}, fmt.Errorf("ops finding source: %w", opsfacts.ErrNoSource)
 	}
-	return opsVulnFindings{store: store, previews: previews, newFixes: newFixes}, nil
+	return opsVulnFindings{store: store, previews: previews, newFixes: newFixes, crit: crit}, nil
+}
+
+// opsCrit is the host criticality of one projection: the criticalities by host
+// ID and whether the last read failed (vulnTierer.view). The zero value is the
+// unset criticality of every subject.
+type opsCrit struct {
+	hosts  map[string]inventory.Criticality
+	failed bool
+}
+
+// scoreOf is the vu-prio-v1 score of f with the criticality of its subject, the
+// input the vulnerability pages use (vulnTierWith). A device, and a host or an
+// image that is not in the read, takes the unset criticality. A failed read
+// gives the higher of the unset score and the score with the criticality of the
+// read before, so a read error never lowers the score.
+func (c opsCrit) scoreOf(f vulnstore.Finding) (int, error) {
+	var known inventory.Criticality // unset
+	if f.Subject.Kind == vulnfinding.SubjectHost || f.Subject.Kind == vulnfinding.SubjectImage {
+		known = c.hosts[f.Subject.ID]
+	}
+	res, err := vulnprio.Compute(vulnprio.Input{Scores: f.Record.Scores, Criticality: known})
+	if err != nil {
+		return 0, fmt.Errorf("finding score: %w", err)
+	}
+	if !c.failed {
+		return res.Score, nil
+	}
+	unset, err := vulnprio.Compute(vulnprio.Input{Scores: f.Record.Scores})
+	if err != nil {
+		return 0, fmt.Errorf("finding score: %w", err)
+	}
+	return max(res.Score, unset.Score), nil
 }
 
 // opsPreviewGuard is the container preview source of one Findings call. It
@@ -141,6 +184,12 @@ func (s opsVulnFindings) Findings(ctx context.Context) ([]opsfacts.Finding, erro
 	if n := opsPreviewHostsOf(fs); n > vulnfix.MaxPreviewHosts {
 		return nil, fmt.Errorf("read findings: %d image hosts: %w", n, errOpsPreviewLimited)
 	}
+	// One criticality read serves every finding of this projection.
+	var crit opsCrit // unset
+	if s.crit != nil {
+		hosts, failed := s.crit.view()
+		crit = opsCrit{hosts: hosts, failed: failed}
+	}
 	out := make([]opsfacts.Finding, 0, len(fs))
 	for _, f := range fs {
 		if f.State == vulnstore.StateFixed {
@@ -150,7 +199,7 @@ func (s opsVulnFindings) Findings(ctx context.Context) ([]opsfacts.Finding, erro
 		if res.Status == vulnfix.StatusUnknown && res.Reason == vulnfix.ReasonListsUnread {
 			return nil, fmt.Errorf("read findings: %w", errOpsUpdateListsUnread)
 		}
-		of, err := opsFindingOf(f, res)
+		of, err := opsFindingOf(crit, f, res)
 		if err != nil {
 			return nil, fmt.Errorf("read findings: %w", err)
 		}
@@ -176,11 +225,12 @@ func opsPreviewHostsOf(fs []vulnstore.Finding) int {
 }
 
 // opsFindingOf maps one stored finding and its fix decision to the projection
-// value. The score is the vu-prio-v1 score of the record's scores.
-func opsFindingOf(f vulnstore.Finding, res vulnfix.Result) (opsfacts.Finding, error) {
-	prio, err := vulnprio.Compute(vulnprio.Input{Scores: f.Record.Scores})
+// value. The score is the vu-prio-v1 score of the record's scores with the host
+// criticality in c (opsCrit.scoreOf).
+func opsFindingOf(c opsCrit, f vulnstore.Finding, res vulnfix.Result) (opsfacts.Finding, error) {
+	score, err := c.scoreOf(f)
 	if err != nil {
-		return opsfacts.Finding{}, fmt.Errorf("finding score: %w", err)
+		return opsfacts.Finding{}, err
 	}
 	out := opsfacts.Finding{
 		HostID:    f.Subject.ID,
@@ -188,7 +238,7 @@ func opsFindingOf(f vulnstore.Finding, res vulnfix.Result) (opsfacts.Finding, er
 		Package:   f.Record.Component.SourcePackage,
 		Installed: f.Record.Component.SourceVersion,
 		Tier:      opsTierOf(f.EpisodePeakTier),
-		Score:     prio.Score,
+		Score:     score,
 		KEV:       f.EpisodeKEV() || f.Record.Scores.KEV != nil,
 		State:     opsStateOf(f.State),
 		Fix:       opsDecisionOf(res),
