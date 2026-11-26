@@ -540,6 +540,19 @@ decides:
 
 This addendum decides none of these points.
 
+**Decision note, 2026-11-26 (maintainer, Axel; option (a); recorded by
+fi04f, Claude).** A `fim.scan` job dispatched before a lock or a
+revocation runs to its end on the host; its result is collected and used
+normally, and the run counts against the lease budget like any other run.
+Lock and revocation take effect at once on everything new: no new claim,
+no new dispatch, no new host connection. While the executor is locked no
+result is collected: the reconciler checks the lock before each collect
+and while the result streams, aborts a collect in progress at lock and
+resumes it after unlock (the run stays open, not failed). Each collect has
+a time limit and the collect attempts of a run are capped; after the cap
+the run is closed as failed with its reason and audited. The restart
+point above is not decided separately by this note.
+
 ### Required specification changes (fi01)
 
 - `docs/spec/09-untrusted-host-data.md`
