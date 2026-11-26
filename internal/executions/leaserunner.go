@@ -596,8 +596,8 @@ const leaseJobsPerTick = 64
 // its result is released on the executor afterwards. A job the executor has
 // no record of ends as unknown and is never run again. A job still running,
 // or one whose read fails, stays running for the next tick. Only lease rows
-// are selected: schedule_id is '' (NOT NULL DEFAULT '') for every other
-// execution, so a user's durable run in flight is never read here.
+// are selected: schedule_id is the empty string (NOT NULL, default empty) for
+// every other execution, so a user's durable run in flight is never read here.
 func (s *Service) collectLeaseJobs(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, `SELECT h.execution_id, h.host_id, e.action_id FROM execution_hosts h
 			JOIN executions e ON e.id = h.execution_id
