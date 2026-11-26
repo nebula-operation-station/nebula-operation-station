@@ -19,13 +19,18 @@ func TestFimScanIsLeaseableOnlyAsTheOneDurableException(t *testing.T) {
 	if !leaseableAction(permit.FimScanActionID) {
 		t.Fatal("fim.scan is not leaseable")
 	}
+	checked := 0
 	for _, a := range actions.Builtin {
 		if a.ID == permit.FimScanActionID || (!a.Durable && len(a.Params) == 0) {
 			continue
 		}
+		checked++
 		if leaseableAction(a.ID) {
 			t.Errorf("%s is leaseable (durable %v, %d parameters)", a.ID, a.Durable, len(a.Params))
 		}
+	}
+	if checked == 0 {
+		t.Fatal("no durable or parameterised action besides fim.scan in the catalog; the check ran on nothing")
 	}
 	for _, id := range ReadGrantActionIDs() {
 		if id == permit.FimScanActionID {
