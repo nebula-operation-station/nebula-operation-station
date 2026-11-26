@@ -563,6 +563,24 @@ service ExecutorService {
   rpc ProposePVEGuestProvision(ProposePVEGuestProvisionRequest) returns (ProposePVEGuestProvisionResponse);
   rpc CommitPVEGuestProvision(CommitPVEGuestProvisionRequest) returns (CommitPVEGuestProvisionResponse);
 
+  // Image preparation, pve.image.prepare (ADR 0008 amendment 2, D1 (a),
+  // PV-03a). The executor resolves the image in its catalog (signed or
+  // local; the catalog SHA-256 pins it), binds the remote, node, storages
+  // and VMID and sets the risk to its own floor (HIGH). Propose: role
+  // server or admin. Commit runs an approved preparation only with a
+  // permit approved under the normal approval semantics: role server or
+  // admin. The server can never approve.
+  rpc ProposePVEImagePrepare(ProposePVEImagePrepareRequest) returns (ProposePVEImagePrepareResponse);
+  rpc CommitPVEImagePrepare(CommitPVEImagePrepareRequest) returns (CommitPVEImagePrepareResponse);
+  // Read-only list of the image catalog (signed and local entries) and the
+  // executor's prepared template records (D4 (a)). Role: server or admin;
+  // the pve-collector has no access. No credentials and no PVE output.
+  rpc ListPVEImages(ListPVEImagesRequest) returns (ListPVEImagesResponse);
+  // Local image entries (trust "Local", D3 (a)): role admin only, over the
+  // admin socket. The server can never add or remove an entry.
+  rpc AddPVELocalImage(AddPVELocalImageRequest) returns (AddPVELocalImageResponse);
+  rpc RemovePVELocalImage(RemovePVELocalImageRequest) returns (RemovePVELocalImageResponse);
+
   // PVE provider reads (ADR 0006, P1-05). Role: server, admin,
   // pve-collector. Metadata only: which remotes exist, their kind, ordered
   // endpoints, trust generation and state. The trust pin is a SHA-256
@@ -2856,6 +2874,124 @@ message CommitPVEGuestProvisionResponse {
   // Set when the run failed after the clone may have created the guest;
   // it is left in PVE for inspection, never deleted.
   bool guest_kept = 5;
+}
+
+// PVEImagePrepareSpec selects one image preparation: an image on a remote,
+// node and storage.
+message PVEImagePrepareSpec {
+  string remote_id = 1;
+  string node = 2;
+  // Storage receiving the template's disk.
+  string storage = 3;
+  // Catalog image ID (signed, or local with the "local-" prefix).
+  string image_id = 4;
+  // Storage receiving the downloaded image (content "import").
+  string import_storage = 5;
+  // VMID of the new template.
+  uint64 vmid = 6;
+}
+
+message ProposePVEImagePrepareRequest {
+  PVEImagePrepareSpec spec = 1;
+}
+
+message ProposePVEImagePrepareResponse {
+  ProposeExecutionResponse permit = 1;
+  // The catalog entry the approval binds.
+  PVEImage image = 2;
+}
+
+message CommitPVEImagePrepareRequest {
+  // The same spec that was proposed and approved.
+  PVEImagePrepareSpec spec = 1;
+  string execution_digest = 2;
+}
+
+message CommitPVEImagePrepareResponse {
+  string execution_id = 1;
+  // The template record written by the preparation.
+  PVETemplateRecord template = 2;
+}
+
+// PVECatalogImage is one image catalog entry: a vendor cloud image and its
+// SHA-256.
+message PVECatalogImage {
+  // e.g. "ubuntu-24.04-amd64"; local entries start with "local-".
+  string id = 1;
+  // Distribution and release, e.g. "ubuntu" and "24.04".
+  string os = 2;
+  string release = 3;
+  // "amd64" or "arm64".
+  string arch = 4;
+  // https vendor cloud-image URL, without user info, query or fragment.
+  string url = 5;
+  // Lowercase hex SHA-256 of the image file.
+  string sha256 = 6;
+  // "qcow2" or "raw".
+  string disk_format = 7;
+}
+
+// PVEImage is one resolved catalog entry and its provenance.
+message PVEImage {
+  PVECatalogImage image = 1;
+  // "signed" or "local".
+  string trust = 2;
+  // The signed catalog the entry came from; zero and empty for a local
+  // entry.
+  int64 catalog_sequence = 3;
+  string catalog_digest = 4;
+}
+
+// PVETemplateRecord is the executor's record of a prepared template.
+message PVETemplateRecord {
+  string remote_id = 1;
+  string node = 2;
+  string storage = 3;
+  string image_id = 4;
+  // Provenance of the image at preparation: "signed" or "local".
+  string trust = 5;
+  uint64 vmid = 6;
+  // Counts the preparations of the key; provisioning binds it
+  // (PVETemplateRef.generation).
+  uint64 generation = 7;
+  // Catalog SHA-256 of the image the template was made from.
+  string source_sha256 = 8;
+  // Hex SHA-256 of the template's PVE configuration right after
+  // preparation.
+  string config_digest = 9;
+  // The remote's trust generation at preparation.
+  uint64 trust_generation = 10;
+  string execution_id = 11;
+  int64 prepared_at_unix = 12;
+}
+
+message ListPVEImagesRequest {}
+
+message ListPVEImagesResponse {
+  // The loaded signed catalog; zero and empty when none is loaded.
+  int64 catalog_sequence = 1;
+  string catalog_digest = 2;
+  // Signed and local entries.
+  repeated PVEImage images = 3;
+  // Prepared template records.
+  repeated PVETemplateRecord templates = 4;
+}
+
+message AddPVELocalImageRequest {
+  // The entry to add; its ID must start with "local-".
+  PVECatalogImage image = 1;
+}
+
+message AddPVELocalImageResponse {}
+
+message RemovePVELocalImageRequest {
+  // A local entry's ID ("local-" prefix).
+  string image_id = 1;
+}
+
+message RemovePVELocalImageResponse {
+  // False when no local entry had the ID.
+  bool removed = 1;
 }
 
 // ReadGrantTrigger selects one approved trigger for one run. It grants no
