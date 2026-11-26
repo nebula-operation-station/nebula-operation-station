@@ -112,7 +112,7 @@ const (
 	// (ADR 0010 D4, "Data and cadence"), and a device whose facts are missed
 	// for StaleAfterIntervals intervals is stale (ADR 0010 D4, "stale after
 	// three missed intervals"). ADR 0010 names no separate report cadence, so
-	// the facts read is the reference. Owner to confirm (open decision).
+	// the facts read is the reference. Confirmed by the owner on 2026-11-25 (PR #874).
 	DeviceReportStaleAfter = StaleAfterIntervals * FactsInterval
 	// MaxFutureSkew bounds how far observed_at may lie ahead of the server
 	// clock. A later timestamp is refused: stored, it would make every

@@ -5,7 +5,9 @@ package executor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -15,6 +17,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport"
 )
 
 // Durable runs (spec 07). Outcome classes besides hostrun's.
@@ -85,34 +88,47 @@ func (s *Service) StartDurable(ctx context.Context, req *pb.StartDurableRequest)
 		return s.runResponse(grant.ExecutionID, r.GetHostId(), false)
 	}
 	defer c.Close()
+	if fin := s.dispatchDurableJob(ctx, c, grant.ExecutionID, r.GetHostId(), d.String(), grant.Parameters, r.GetArtifact(), timeout, secrets...); fin != nil {
+		s.finishRun(*fin)
+	}
+	return s.runResponse(grant.ExecutionID, r.GetHostId(), false)
+}
+
+// dispatchDurableJob stores and starts the job of a recorded run over c
+// and records how far it got. A connection that breaks during the dispatch
+// leaves the run open for the reconciler. It does not call the authority:
+// a run that ends here is returned for the caller to finish (finishRun),
+// so a caller that holds the read guard can finish it after the guard.
+// digest names the run in the audit (a permit digest or a read grant).
+func (s *Service) dispatchDurableJob(ctx context.Context, c *sshtransport.Client, executionID, hostID, digest string, params, artifact []byte,
+	timeout time.Duration, secrets ...hostrun.Secret) *executordb.Run {
 	endpoint := c.Endpoint.String()
 	// The endpoint is recorded before anything is sent (ep02): a dispatch
 	// that breaks mid-way still names where it was attempted. Without the
 	// record nothing is dispatched.
-	if err := s.db.SetRunDispatchEndpoint(grant.ExecutionID, r.GetHostId(), endpoint); err != nil {
-		s.log.Error("audit", "kind", "store_error", "op", "set_run_dispatch_endpoint", "execution", grant.ExecutionID, "detail", err.Error())
-		s.finishRun(executordb.Run{ExecutionID: grant.ExecutionID, HostID: r.GetHostId(), Class: classNotExecuted,
-			Detail: "not dispatched: the dispatch endpoint could not be recorded", ExitCode: -1})
-		return s.runResponse(grant.ExecutionID, r.GetHostId(), false)
+	if err := s.db.SetRunDispatchEndpoint(executionID, hostID, endpoint); err != nil {
+		s.log.Error("audit", "kind", "store_error", "op", "set_run_dispatch_endpoint", "execution", executionID, "detail", err.Error())
+		return &executordb.Run{ExecutionID: executionID, HostID: hostID, Class: classNotExecuted,
+			Detail: "not dispatched: the dispatch endpoint could not be recorded", ExitCode: -1}
 	}
-	outcome, detail, err := hostrun.Dispatch(ctx, c.Client, s.jobs, grant.ExecutionID, grant.Parameters, r.GetArtifact(), timeout, secrets...)
+	outcome, detail, err := hostrun.Dispatch(ctx, c.Client, s.jobs, executionID, params, artifact, timeout, secrets...)
 	switch {
 	case err != nil:
 		// The connection broke during dispatch: the reconciler finds out
 		// whether the job is on the host.
-		s.log.Warn("audit", "kind", "run_dispatch_uncertain", "execution", grant.ExecutionID, "host", r.GetHostId(),
+		s.log.Warn("audit", "kind", "run_dispatch_uncertain", "execution", executionID, "host", hostID,
 			"endpoint", endpoint, "detail", err.Error())
 	case outcome == hostrun.NotStarted:
-		s.finishRun(executordb.Run{ExecutionID: grant.ExecutionID, HostID: r.GetHostId(), Class: hostrun.ClassPrecheckFailed,
-			Detail: detail, ExitCode: -1, Endpoint: endpoint})
+		return &executordb.Run{ExecutionID: executionID, HostID: hostID, Class: hostrun.ClassPrecheckFailed,
+			Detail: detail, ExitCode: -1, Endpoint: endpoint}
 	default:
-		if err := s.db.MarkRunRunning(grant.ExecutionID, r.GetHostId(), endpoint); err != nil {
-			s.log.Error("audit", "kind", "store_error", "op", "mark_run_running", "execution", grant.ExecutionID, "detail", err.Error())
+		if err := s.db.MarkRunRunning(executionID, hostID, endpoint); err != nil {
+			s.log.Error("audit", "kind", "store_error", "op", "mark_run_running", "execution", executionID, "detail", err.Error())
 		}
-		s.log.Info("audit", "kind", "run_dispatched", "digest", d.String(), "host", r.GetHostId(), "execution", grant.ExecutionID,
+		s.log.Info("audit", "kind", "run_dispatched", "digest", digest, "host", hostID, "execution", executionID,
 			"endpoint", endpoint)
 	}
-	return s.runResponse(grant.ExecutionID, r.GetHostId(), false)
+	return nil
 }
 
 func (s *Service) runResponse(executionID, hostID string, release bool) (*pb.StartDurableResponse, error) {
@@ -228,7 +244,13 @@ func (s *Service) ReconcileOnce(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if s.isDispatching(run.ExecutionID + "/" + run.HostID) {
+		// A Lock during the pass stops it before the next host connection
+		// (ADR 0007, decision note 2026-11-26): open runs wait for unlock.
+		if !s.keys.Unlocked() {
+			return
+		}
+		key := run.ExecutionID + "/" + run.HostID
+		if s.isDispatching(key) || s.isCollecting(key) {
 			continue
 		}
 		s.reconcile(ctx, run)
@@ -236,6 +258,85 @@ func (s *Service) ReconcileOnce(ctx context.Context) {
 	// A container run finished before its recreation row was completed
 	// (a crash in between) is judged now, from its stored result.
 	s.judgeFinishedIntents()
+}
+
+// reconcileConns holds the host connections the reconciler and the
+// fim.scan collect keep open. A connection is admitted only while the
+// keyring is unlocked, and Lock closes every admitted one after locking the
+// keyring (closeReconcileConns), both under mu. So once Lock has returned no
+// reconciler connection is open and none is admitted: no new host command
+// (a check, a collect session, a remove) can start, even one whose lock
+// check passed just before Lock. A command already started stops with its
+// connection; the job on the host is not touched (ADR 0007, decision note
+// 2026-11-26).
+type reconcileConns struct {
+	mu    sync.Mutex
+	conns map[*sshtransport.Client]struct{}
+	// beforeHostOp, if set (tests only, before any pass), runs after the
+	// lock check of each host operation of the reconciler and before the
+	// operation, with its name and execution ID.
+	beforeHostOp func(op, executionID string)
+}
+
+// admitReconcileConn records c as a reconciler connection and reports
+// whether it may be used: false while the keyring is locked.
+func (s *Service) admitReconcileConn(c *sshtransport.Client) bool {
+	rc := &s.reconcileConns
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	if !s.keys.Unlocked() {
+		return false
+	}
+	if rc.conns == nil {
+		rc.conns = map[*sshtransport.Client]struct{}{}
+	}
+	rc.conns[c] = struct{}{}
+	return true
+}
+
+// dropReconcileConn forgets c; its owner closes it.
+func (s *Service) dropReconcileConn(c *sshtransport.Client) {
+	rc := &s.reconcileConns
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	delete(rc.conns, c)
+}
+
+// closeReconcileConns closes every admitted reconciler connection. Lock
+// calls it after locking the keyring. It closes the SSH connection only
+// (safe to repeat); the owner still calls the transport's Close, which is
+// not safe to call concurrently. It never waits for a host.
+func (s *Service) closeReconcileConns() {
+	rc := &s.reconcileConns
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	for c := range rc.conns {
+		_ = c.Client.Close()
+		delete(rc.conns, c)
+	}
+}
+
+// hostOpAllowed reports whether the reconciler may start the host operation
+// op for the execution: only while the keyring is unlocked. It narrows the
+// window; the guarantee is the connection closed by Lock.
+func (s *Service) hostOpAllowed(op, executionID string) bool {
+	ok := s.keys.Unlocked()
+	// Tests let Lock land here, between the check and the operation.
+	if h := s.reconcileConns.beforeHostOp; h != nil {
+		h(op, executionID)
+	}
+	return ok
+}
+
+// pausedByLock reports whether the executor is locked; a host operation that
+// failed then failed because Lock closed its connection. The run stays open
+// for a pass after unlock and the failure is not counted.
+func (s *Service) pausedByLock(run executordb.Run, op string) bool {
+	if s.keys.Unlocked() {
+		return false
+	}
+	s.log.Info("audit", "kind", "reconcile_paused", "execution", run.ExecutionID, "host", run.HostID, "op", op, "detail", "executor locked")
+	return true
 }
 
 func (s *Service) setDispatching(key string, on bool) {
@@ -276,6 +377,10 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 		return
 	}
 	c, err := s.connect(ctx, run.HostID, run.Fingerprint, eps)
+	if err != nil && s.pausedByLock(run, "connect") {
+		// A Lock during the handshake: not a failure of the host.
+		return
+	}
 	if err != nil {
 		// Retried on every due pass: a failed failover is audited once per
 		// run until a host endpoint answers again (ep02).
@@ -301,10 +406,31 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 			"attempt", attempt, "next_try_in", int(nextIn.Round(time.Second).Seconds()))
 		return
 	}
-	defer c.Close()
+	// Lock closes the connection from here on (reconcileConns); a Lock
+	// before this point refuses it.
+	if !s.admitReconcileConn(c) {
+		_ = c.Close()
+		s.pausedByLock(run, "connect")
+		return
+	}
+	// A fim.scan collect takes the connection over (startFimCollect).
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			s.dropReconcileConn(c)
+			_ = c.Close()
+		}
+	}()
 	s.clearFailoverAudited(key)
 	if waiting {
+		if !s.hostOpAllowed("boot_id", run.ExecutionID) {
+			s.pausedByLock(run, "boot_id")
+			return
+		}
 		id, err := hostrun.BootID(ctx, c.Client, s.jobs)
+		if err != nil && s.pausedByLock(run, "boot_id") {
+			return
+		}
 		switch {
 		case err == nil && id != reboot.OldBootID:
 			s.finishReboot(run, reboot, hostrun.ClassSuccess, "rebooted and back", c.Endpoint.String())
@@ -313,8 +439,15 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 		}
 		return
 	}
+	if !s.hostOpAllowed("check", run.ExecutionID) {
+		s.pausedByLock(run, "check")
+		return
+	}
 	st, err := hostrun.Check(ctx, c.Client, s.jobs, run.ExecutionID)
 	if err != nil {
+		if s.pausedByLock(run, "check") {
+			return
+		}
 		attempt, nextIn, firstFail := s.noteReconcileFailure(key, now)
 		if now.After(reconcileDeadline(run, firstFail)) {
 			s.closeUncheckable(run, key, "check failed: "+err.Error())
@@ -324,8 +457,9 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 			"attempt", attempt, "next_try_in", int(nextIn.Round(time.Second).Seconds()))
 		return
 	}
-	// The host is checkable again: the failure streak ends.
-	s.clearReconcileBackoff(key)
+	// The host is checkable again: the failure streak ends (failed collect
+	// attempts are counted on).
+	s.clearCheckBackoff(key)
 	since := run.DispatchedAt
 	if since.IsZero() {
 		since = run.CreatedAt
@@ -346,7 +480,7 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 		s.finishRunChecked(fin, check)
 		// The run directory (with any secrets) may outlive the job
 		// directory; remove both.
-		_ = hostrun.Remove(ctx, c.Client, s.jobs, run.ExecutionID)
+		s.removeJob(ctx, c, run, false)
 	case "incomplete":
 		// The dispatch was cut off before the job was stored. Give a
 		// dispatch in progress its time, then end the run and remove
@@ -354,13 +488,13 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 		if now.Sub(since) > stuckDispatched {
 			fin.Class, fin.Detail = classNotExecuted, "the dispatch was cut off before the job was stored"
 			s.finishRunChecked(fin, check)
-			_ = hostrun.Remove(ctx, c.Client, s.jobs, run.ExecutionID)
+			s.removeJob(ctx, c, run, false)
 		}
 	case "dispatched":
 		if now.Sub(since) > stuckDispatched {
 			fin.Class, fin.Detail = classNotExecuted, "the job was stored but never started"
 			s.finishRunChecked(fin, check)
-			_ = hostrun.Remove(ctx, c.Client, s.jobs, run.ExecutionID)
+			s.removeJob(ctx, c, run, false)
 		} else if run.State == executordb.RunDispatching {
 			_ = s.db.MarkRunRunning(run.ExecutionID, run.HostID, run.Endpoint)
 		}
@@ -376,12 +510,21 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 		s.finishRunChecked(fin, check)
 		// A killed job never ran its own cleanup: remove the job and run
 		// directories (and any secrets) now.
-		if err := hostrun.Remove(ctx, c.Client, s.jobs, run.ExecutionID); err != nil {
-			s.log.Warn("audit", "kind", "job_cleanup_failed", "execution", run.ExecutionID, "host", run.HostID, "detail", err.Error())
-		}
+		s.removeJob(ctx, c, run, true)
 	case "finished":
+		if run.ActionID == permit.FimScanActionID {
+			handedOff = s.startFimCollect(ctx, c, run, fin, st.ExitCode, check)
+			return
+		}
+		if !s.hostOpAllowed("collect", run.ExecutionID) {
+			s.pausedByLock(run, "collect")
+			return
+		}
 		res, err := hostrun.Collect(ctx, c.Client, s.jobs, run.ExecutionID, st.ExitCode)
 		if err != nil {
+			if s.pausedByLock(run, "collect") {
+				return
+			}
 			s.log.Warn("audit", "kind", "reconcile_collect_failed", "execution", run.ExecutionID, "host", run.HostID, "detail", err.Error())
 			return
 		}
@@ -408,10 +551,219 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 		}
 		// Stored: the job directory can go (the tmpfiles rule is the
 		// fallback, spec 07).
-		if err := hostrun.Remove(ctx, c.Client, s.jobs, run.ExecutionID); err != nil {
-			s.log.Warn("audit", "kind", "job_cleanup_failed", "execution", run.ExecutionID, "host", run.HostID, "detail", err.Error())
+		s.removeJob(ctx, c, run, true)
+	}
+}
+
+// Collecting a fim.scan result (ADR 0007, decision note 2026-11-26). A job
+// dispatched before a Lock or a revocation runs to its end; its result is
+// collected and used like any other run's. While the executor is locked no
+// collect touches the host: a collect in progress is aborted at Lock and
+// the run stays open until a pass after unlock.
+const (
+	// fimCollectTimeout bounds one collect of a fim.scan result (document
+	// and log), measured on the service clock and in real time. The
+	// stream itself may take up to about 19 minutes for a 128 MiB document
+	// at hostrun's minimum rate.
+	fimCollectTimeout = 20 * time.Minute
+	// maxFimCollectAttempts is how many collects of one run may fail
+	// (error or time limit; a Lock abort does not count) before the run is
+	// closed as classCollectFailed.
+	maxFimCollectAttempts = 3
+	// maxConcurrentCollects bounds the fim.scan collects in flight; a run
+	// beyond it waits for a later pass.
+	maxConcurrentCollects = 2
+	// collectWatchInterval is how often a running collect checks the
+	// keyring lock and its time limit.
+	collectWatchInterval = 50 * time.Millisecond
+	// classCollectFailed closes a fim.scan run whose result could not be
+	// collected within maxFimCollectAttempts.
+	classCollectFailed = "collect_failed"
+	// collectMarkPrefix marks an in-flight collect in the dispatching set.
+	collectMarkPrefix = "collect/"
+)
+
+var (
+	// errCollectLocked aborts a collect because the executor was locked.
+	errCollectLocked = errors.New("executor locked during collect")
+	// errCollectTimeout aborts a collect that passed fimCollectTimeout.
+	errCollectTimeout = errors.New("collect time limit passed")
+)
+
+// markCollecting records an in-flight collect of the run key and reports
+// whether it may start: not already collecting and below
+// maxConcurrentCollects.
+func (s *Service) markCollecting(key string) bool {
+	s.dispatchMu.Lock()
+	defer s.dispatchMu.Unlock()
+	if s.dispatching == nil {
+		s.dispatching = map[string]bool{}
+	}
+	if s.dispatching[collectMarkPrefix+key] {
+		return false
+	}
+	n := 0
+	for k := range s.dispatching {
+		if strings.HasPrefix(k, collectMarkPrefix) {
+			n++
 		}
 	}
+	if n >= maxConcurrentCollects {
+		return false
+	}
+	s.dispatching[collectMarkPrefix+key] = true
+	return true
+}
+
+func (s *Service) unmarkCollecting(key string) {
+	s.setDispatching(collectMarkPrefix+key, false)
+}
+
+// isCollecting reports whether a collect of the run key is in flight.
+func (s *Service) isCollecting(key string) bool {
+	return s.isDispatching(collectMarkPrefix + key)
+}
+
+// startFimCollect starts collecting a finished fim.scan run over c in its
+// own goroutine, so a slow host never holds reconcileMu or the pass over
+// other runs. It reports whether it took c over (and closes it); false
+// leaves the run for a later pass.
+func (s *Service) startFimCollect(ctx context.Context, c *sshtransport.Client, run, fin executordb.Run, exitCode int, check string) bool {
+	key := run.ExecutionID + "/" + run.HostID
+	if !s.markCollecting(key) {
+		return false
+	}
+	go func() {
+		defer s.unmarkCollecting(key)
+		// Runs before the deferred Close in collectFimScan has returned to
+		// here; Lock may still close the SSH connection until then.
+		defer s.dropReconcileConn(c)
+		s.collectFimScan(ctx, c, run, fin, exitCode, check)
+	}()
+	return true
+}
+
+// lockCheckWriter discards the checked result bytes and aborts the stream
+// at the first chunk that arrives while the executor is locked.
+type lockCheckWriter struct{ s *Service }
+
+func (w lockCheckWriter) Write(p []byte) (int, error) {
+	if !w.s.keys.Unlocked() {
+		return 0, errCollectLocked
+	}
+	return len(p), nil
+}
+
+// collectFimScan closes a finished fim.scan run (a durable read, see
+// dispatchDurableRead) and closes c. Its result is read with the fim.scan
+// document limit (hostrun.MaxDurableResultLimit, 128 MiB), streamed and
+// checked as it passes, never buffered: the run keeps class, exit status
+// and the bounded log, never the document (MaxResponseSize is 64 MiB, the
+// document up to 128 MiB). No integrity intake is wired to the executor yet
+// (docs/implementation/integrity-wiring-decisions.md, 3.2), so the checked
+// bytes go nowhere and the detail says so.
+//
+// The collect is bounded by fimCollectTimeout and aborted at Lock: Lock
+// closes its connection (reconcileConns), so no session of it starts after
+// Lock returned; the lock is also checked before it starts, every
+// collectWatchInterval and before each streamed chunk. An aborted collect
+// leaves the run open. A failed collect is
+// retried on later passes up to maxFimCollectAttempts, then the run is
+// closed as classCollectFailed.
+func (s *Service) collectFimScan(ctx context.Context, c *sshtransport.Client, run, fin executordb.Run, exitCode int, check string) {
+	key := run.ExecutionID + "/" + run.HostID
+	base, abort := context.WithCancelCause(ctx)
+	defer abort(nil)
+	collectCtx, stop := context.WithTimeoutCause(base, fimCollectTimeout, errCollectTimeout)
+	defer stop()
+	// The connection is closed when the collect ends or is aborted: a
+	// stalled session cannot outlive the abort.
+	defer closeReadConnectionOnCancel(collectCtx, c)()
+	if !s.hostOpAllowed("collect", run.ExecutionID) {
+		s.log.Info("audit", "kind", "reconcile_collect_paused", "execution", run.ExecutionID, "host", run.HostID, "detail", "executor locked")
+		return
+	}
+	start := s.clock()
+	s.log.Info("audit", "kind", "reconcile_collect_started", "execution", run.ExecutionID, "host", run.HostID)
+	go func() {
+		t := time.NewTicker(collectWatchInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-collectCtx.Done():
+				return
+			case <-t.C:
+			}
+			if !s.keys.Unlocked() {
+				abort(errCollectLocked)
+				return
+			}
+			if s.clock().Sub(start) > fimCollectTimeout {
+				abort(errCollectTimeout)
+				return
+			}
+		}
+	}()
+	res, err := hostrun.CollectStream(collectCtx, c.Client, s.jobs, run.ExecutionID, exitCode, hostrun.MaxDurableResultLimit, lockCheckWriter{s})
+	if err != nil {
+		cause := context.Cause(collectCtx)
+		switch {
+		case errors.Is(err, errCollectLocked) || errors.Is(cause, errCollectLocked) || !s.keys.Unlocked():
+			// Not a failure: resumed by a pass after unlock.
+			s.log.Info("audit", "kind", "reconcile_collect_paused", "execution", run.ExecutionID, "host", run.HostID, "detail", "executor locked")
+			return
+		case ctx.Err() != nil:
+			// The reconciler is shutting down; the run stays open.
+			return
+		}
+		reason := err.Error()
+		if errors.Is(cause, errCollectTimeout) {
+			reason = fmt.Sprintf("the collect did not finish within %s", fimCollectTimeout)
+		}
+		attempt := s.noteCollectFailure(key)
+		if attempt < maxFimCollectAttempts {
+			s.log.Warn("audit", "kind", "reconcile_collect_failed", "execution", run.ExecutionID, "host", run.HostID,
+				"detail", boundReason(reason), "attempt", attempt, "max_attempts", maxFimCollectAttempts)
+			return
+		}
+		s.clearReconcileBackoff(key)
+		fin.Class = classCollectFailed
+		fin.Detail = fmt.Sprintf("the fim-scan result could not be collected in %d attempts (last: %s); the job ran, its result is not used",
+			attempt, boundReason(reason))
+		s.log.Warn("audit", "kind", "reconcile_collect_gave_up", "execution", run.ExecutionID, "host", run.HostID,
+			"detail", fin.Detail, "attempts", attempt)
+		s.finishRunChecked(fin, check)
+		s.removeJob(collectCtx, c, run, true)
+		return
+	}
+	s.clearReconcileBackoff(key)
+	fin.Class, fin.Detail, fin.ExitCode = res.Class, res.Detail, res.ExitCode
+	fin.Log, fin.LogTruncated = res.Log, res.LogTruncated
+	if res.Class == hostrun.ClassSuccess {
+		fin.Detail = fmt.Sprintf("fim-scan document of %d bytes checked; not kept: no integrity intake is wired", res.Bytes)
+	}
+	s.finishRunChecked(fin, check)
+	s.removeJob(collectCtx, c, run, true)
+}
+
+// removeJob removes the job and run directories of a closed run (the
+// tmpfiles rule is the fallback, spec 07). It does not touch the host once
+// the executor is locked; a Remove that Lock cut off is not a failure.
+// auditFailure audits any other failed removal.
+func (s *Service) removeJob(ctx context.Context, c *sshtransport.Client, run executordb.Run, auditFailure bool) {
+	if !s.hostOpAllowed("remove", run.ExecutionID) {
+		s.log.Info("audit", "kind", "job_cleanup_skipped", "execution", run.ExecutionID, "host", run.HostID, "detail", "executor locked")
+		return
+	}
+	err := hostrun.Remove(ctx, c.Client, s.jobs, run.ExecutionID)
+	if err == nil || !auditFailure {
+		return
+	}
+	if !s.keys.Unlocked() {
+		s.log.Info("audit", "kind", "job_cleanup_skipped", "execution", run.ExecutionID, "host", run.HostID, "detail", "executor locked")
+		return
+	}
+	s.log.Warn("audit", "kind", "job_cleanup_failed", "execution", run.ExecutionID, "host", run.HostID, "detail", err.Error())
 }
 
 // classHostNotReturned: a rebooted host did not come back (spec 07/11).
@@ -448,6 +800,9 @@ type reconcileBackoffState struct {
 	attempts  int
 	firstFail time.Time
 	lastTry   time.Time
+	// collectFails counts failed fim.scan collects of the run; it survives
+	// a successful check (clearCheckBackoff).
+	collectFails int
 }
 
 // reconcileDeadline is when a run that is not waiting for a reboot stops
@@ -511,8 +866,11 @@ func (s *Service) noteReconcileFailure(key string, now time.Time) (int, time.Dur
 	}
 	st, ok := s.reconcileBackoff[key]
 	if !ok {
-		st = &reconcileBackoffState{firstFail: now}
+		st = &reconcileBackoffState{}
 		s.reconcileBackoff[key] = st
+	}
+	if st.firstFail.IsZero() {
+		st.firstFail = now
 	}
 	st.attempts++
 	st.lastTry = now
@@ -526,6 +884,40 @@ func (s *Service) clearReconcileBackoff(key string) {
 	defer s.reconcileBackoffMu.Unlock()
 	delete(s.reconcileBackoff, key)
 	delete(s.failoverAudited, key)
+}
+
+// clearCheckBackoff ends the check failure streak of a run that was checked
+// successfully, keeping its count of failed collects.
+func (s *Service) clearCheckBackoff(key string) {
+	s.reconcileBackoffMu.Lock()
+	defer s.reconcileBackoffMu.Unlock()
+	delete(s.failoverAudited, key)
+	st, ok := s.reconcileBackoff[key]
+	if !ok {
+		return
+	}
+	if st.collectFails == 0 {
+		delete(s.reconcileBackoff, key)
+		return
+	}
+	st.attempts, st.firstFail, st.lastTry = 0, time.Time{}, time.Time{}
+}
+
+// noteCollectFailure records one failed collect of a run and returns the
+// number of failed collects so far.
+func (s *Service) noteCollectFailure(key string) int {
+	s.reconcileBackoffMu.Lock()
+	defer s.reconcileBackoffMu.Unlock()
+	if s.reconcileBackoff == nil {
+		s.reconcileBackoff = map[string]*reconcileBackoffState{}
+	}
+	st, ok := s.reconcileBackoff[key]
+	if !ok {
+		st = &reconcileBackoffState{}
+		s.reconcileBackoff[key] = st
+	}
+	st.collectFails++
+	return st.collectFails
 }
 
 // markFailoverAudited records that the failed failover of the run key is
