@@ -265,20 +265,20 @@ func (s *Service) auditLocalRefused(ctx context.Context, op, id, reason string) 
 	s.log.Warn("audit", "kind", "pve_local_image_refused", "op", op, "image", id, "reason", reason, "by", callerName(ctx))
 }
 
-// localImageRPCError maps a local-entry error to its status and audit
-// reason.
-func localImageRPCError(err error) (error, string) {
+// localImageRPCError maps a local-entry error to its audit reason and
+// status.
+func localImageRPCError(err error) (string, error) {
 	switch {
 	case errors.Is(err, ErrPveLocalImageStore):
 		// First: a store error may wrap the grammar or limit error of a
 		// corrupt file, which is not the caller's entry.
-		return status.Error(codes.Unavailable, "local image: the local entries cannot be read or written; nothing changed"), pveLocalRefusedStore
+		return pveLocalRefusedStore, status.Error(codes.Unavailable, "local image: the local entries cannot be read or written; nothing changed")
 	case errors.Is(err, ErrPveLocalImageInvalid), errors.Is(err, release.ErrFormat):
-		return status.Error(codes.InvalidArgument, "local image: the entry is invalid; the id must start with \"local-\" and the entry must follow the image catalog grammar (https URL, sha256, qcow2 or raw)"), pveLocalRefusedInvalid
+		return pveLocalRefusedInvalid, status.Error(codes.InvalidArgument, "local image: the entry is invalid; the id must start with \"local-\" and the entry must follow the image catalog grammar (https URL, sha256, qcow2 or raw)")
 	case errors.Is(err, ErrPveLocalImageLimit):
-		return status.Error(codes.ResourceExhausted, fmt.Sprintf("local image: at most %d local entries", maxPveLocalImages)), pveLocalRefusedLimit
+		return pveLocalRefusedLimit, status.Error(codes.ResourceExhausted, fmt.Sprintf("local image: at most %d local entries", maxPveLocalImages))
 	default:
-		return status.Error(codes.Unavailable, "local image: the local entries cannot be read or written; nothing changed"), pveLocalRefusedStore
+		return pveLocalRefusedStore, status.Error(codes.Unavailable, "local image: the local entries cannot be read or written; nothing changed")
 	}
 }
 
@@ -307,7 +307,7 @@ func (s *Service) AddPVELocalImage(ctx context.Context, in *pb.AddPVELocalImageR
 	img := release.Image{ID: pi.GetId(), OS: pi.GetOs(), Release: pi.GetRelease(), Arch: pi.GetArch(), URL: pi.GetUrl(), SHA256: pi.GetSha256(), DiskFormat: pi.GetDiskFormat()}
 	replaced, err := cat.addLocal(img)
 	if err != nil {
-		st, reason := localImageRPCError(err)
+		reason, st := localImageRPCError(err)
 		if reason == pveLocalRefusedStore {
 			s.log.Error("pve local image store", "op", op, "err", err)
 		}
@@ -340,7 +340,7 @@ func (s *Service) RemovePVELocalImage(ctx context.Context, in *pb.RemovePVELocal
 	}
 	removed, err := cat.RemoveLocal(id)
 	if err != nil {
-		st, reason := localImageRPCError(err)
+		reason, st := localImageRPCError(err)
 		if reason == pveLocalRefusedStore {
 			s.log.Error("pve local image store", "op", op, "err", err)
 		}
