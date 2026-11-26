@@ -22,6 +22,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/integrity"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/release"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"google.golang.org/protobuf/proto"
 )
 
 // I1 self-check of nebula-server (ADR 0015 D4, IG-03). The server checks
@@ -134,6 +135,28 @@ const (
 	integrityTextLimit = 256
 	// integrityFindingsLimit bounds how many executor findings are shown.
 	integrityFindingsLimit = 50
+	// integrityTamperLimit bounds how many open I2 baseline tamper findings
+	// are shown.
+	integrityTamperLimit = 50
+)
+
+// Verdicts of the executor block. Only verdictClean says the executor found
+// nothing open; every other state is shown as not clean (fail-safe).
+const (
+	// verdictClean: the last run is complete and no finding is open.
+	verdictClean = "sauber"
+	// verdictOpen: an I1 or I2 finding is open, or the lock is closed.
+	verdictOpen = "offene Befunde"
+	// verdictUnconfirmed: no complete run is known, so nothing is confirmed.
+	verdictUnconfirmed = "nicht bestätigt"
+)
+
+// Fixed log messages for a failed executor read. The error text is never
+// logged: it may carry paths or other operator-private values.
+const (
+	integrityReadFailedMsg     = "integrity status: executor read failed"
+	integrityReadTimedOutMsg   = "integrity status: executor read timed out"
+	integrityReadEmptyReplyMsg = "integrity status: executor reply empty"
 )
 
 // integrityStatusReader reads the executor's I1 status (read-only).
@@ -159,6 +182,9 @@ type integrityStatusPage struct {
 	monitor *integrity.Monitor
 	read    integrityStatusReader
 	now     func() time.Time
+	// log receives the fixed-word warnings of failed executor reads; nil
+	// means slog.Default.
+	log *slog.Logger
 }
 
 // integrityStatusJSON is the JSON form. The server's check keeps its
@@ -174,10 +200,13 @@ type integrityStatusJSON struct {
 // value came from the executor and is clipped (integrityTextLimit).
 // Available is false when the executor could not be asked; the other
 // fields are then empty and Checked is the time of the failed attempt.
+// Verdict is verdictClean only for a complete last run with no open I1 or
+// I2 finding and an open lock; anything else is not clean.
 type executorView struct {
 	Source          string        `json:"source"`
 	Available       bool          `json:"available"`
 	Checked         string        `json:"checked"`
+	Verdict         string        `json:"verdict,omitempty"`
 	Configured      bool          `json:"configured"`
 	Running         bool          `json:"running"`
 	TotalRuns       uint64        `json:"total_runs"`
@@ -186,16 +215,21 @@ type executorView struct {
 	LastRun         *runView      `json:"last_run,omitempty"`
 	Findings        []findingView `json:"findings,omitempty"`
 	FindingsOmitted int           `json:"findings_omitted,omitempty"`
+	BaselineTamper  []tamperView  `json:"baseline_tamper_findings,omitempty"`
+	TamperOmitted   int           `json:"baseline_tamper_findings_omitted,omitempty"`
 	Note            string        `json:"note,omitempty"`
 }
 
-// runView is the executor's latest integrity run as text.
+// runView is the executor's latest integrity run as text. State and
+// ManifestSHA256 are the executor's own statement about that run.
 type runView struct {
 	Started           string `json:"started,omitempty"`
 	Finished          string `json:"finished,omitempty"`
+	State             string `json:"state,omitempty"`
 	Complete          bool   `json:"complete"`
 	Incomplete        string `json:"incomplete,omitempty"`
 	ReleaseVersion    string `json:"release_version,omitempty"`
+	ManifestSHA256    string `json:"manifest_sha256,omitempty"`
 	Files             int32  `json:"files"`
 	Different         int32  `json:"different"`
 	Missing           int32  `json:"missing"`
@@ -203,6 +237,17 @@ type runView struct {
 	Unreadable        int32  `json:"unreadable"`
 	Locking           int32  `json:"locking"`
 	DeviationsOmitted int32  `json:"deviations_omitted,omitempty"`
+}
+
+// tamperView is one open I2 baseline tamper finding as text (ADR 0015 D7).
+// The executor does not send its approved digest; PresentedDigest is the
+// digest it recomputed from the server's list.
+type tamperView struct {
+	HostID          string `json:"host_id"`
+	PresentedDigest string `json:"presented_digest,omitempty"`
+	FirstSeen       string `json:"first_seen,omitempty"`
+	LastSeen        string `json:"last_seen,omitempty"`
+	Count           int64  `json:"count"`
 }
 
 // findingView is one executor finding as text.
@@ -219,9 +264,15 @@ type findingView struct {
 }
 
 // mountIntegrityStatus serves the status page for the monitor m, reading
-// the executor's status through read.
+// the executor's status through read, with warnings to slog.Default.
 func mountIntegrityStatus(mux *http.ServeMux, m *integrity.Monitor, read integrityStatusReader) {
-	p := integrityStatusPage{monitor: m, read: read, now: time.Now}
+	mountIntegrityStatusLog(mux, m, read, slog.Default())
+}
+
+// mountIntegrityStatusLog is mountIntegrityStatus with the logger for the
+// warnings of failed executor reads.
+func mountIntegrityStatusLog(mux *http.ServeMux, m *integrity.Monitor, read integrityStatusReader, log *slog.Logger) {
+	p := integrityStatusPage{monitor: m, read: read, now: time.Now, log: log}
 	mux.HandleFunc("GET "+integrityStatusPath, p.serve)
 }
 
@@ -253,7 +304,8 @@ func (p integrityStatusPage) serve(w http.ResponseWriter, r *http.Request) {
 
 // executor reads the executor's status once, bounded by
 // integrityExecutorTimeout. Any error, a missing reader or an empty reply
-// gives the unavailable view; the last good value is never reused.
+// gives the unavailable view; the last good value is never reused. A failed
+// read is logged with a fixed message only.
 func (p integrityStatusPage) executor(ctx context.Context) executorView {
 	checked := p.now().UTC()
 	unavailable := executorView{Source: executorSourceLabel, Checked: stampTime(checked)}
@@ -263,10 +315,29 @@ func (p integrityStatusPage) executor(ctx context.Context) executorView {
 	ctx, cancel := context.WithTimeout(ctx, integrityExecutorTimeout)
 	defer cancel()
 	resp, err := p.read(ctx, &pb.GetIntegrityStatusRequest{})
-	if err != nil || resp == nil {
+	switch {
+	case err != nil && ctx.Err() == context.DeadlineExceeded:
+		p.warn(integrityReadTimedOutMsg)
+		return unavailable
+	case err != nil:
+		p.warn(integrityReadFailedMsg)
+		return unavailable
+	case resp == nil || proto.Size(resp) == 0:
+		// Nothing at all was reported: the executor did not say what its
+		// state is, so the page cannot show it as available.
+		p.warn(integrityReadEmptyReplyMsg)
 		return unavailable
 	}
 	return executorViewOf(resp, checked)
+}
+
+// warn logs a fixed message for a failed executor read.
+func (p integrityStatusPage) warn(msg string) {
+	log := p.log
+	if log == nil {
+		log = slog.Default()
+	}
+	log.Warn(msg)
 }
 
 // executorViewOf turns the executor's reply into text, clipped and
@@ -283,13 +354,16 @@ func executorViewOf(r *pb.GetIntegrityStatusResponse, checked time.Time) executo
 		LockedSince: stampUnix(r.GetLockedSinceUnix()),
 		Note:        clipText(r.GetNote()),
 	}
-	if lr := r.GetLastRun(); lr != nil {
+	lr := r.GetLastRun()
+	if lr != nil {
 		v.LastRun = &runView{
 			Started:           stampUnix(lr.GetStartedUnix()),
 			Finished:          stampUnix(lr.GetFinishedUnix()),
+			State:             clipText(lr.GetState()),
 			Complete:          lr.GetComplete(),
 			Incomplete:        clipText(lr.GetIncomplete()),
 			ReleaseVersion:    clipText(lr.GetReleaseVersion()),
+			ManifestSHA256:    clipText(lr.GetManifestSha256()),
 			Files:             lr.GetFiles(),
 			Different:         lr.GetDifferent(),
 			Missing:           lr.GetMissing(),
@@ -316,6 +390,30 @@ func executorViewOf(r *pb.GetIntegrityStatusResponse, checked time.Time) executo
 			LastSeen:  stampUnix(f.GetLastSeenUnix()),
 			Count:     f.GetCount(),
 		})
+	}
+	tamper := r.GetBaselineTamperFindings()
+	for i, f := range tamper {
+		if i == integrityTamperLimit {
+			v.TamperOmitted = len(tamper) - i
+			break
+		}
+		v.BaselineTamper = append(v.BaselineTamper, tamperView{
+			HostID:          clipText(f.GetHostId()),
+			PresentedDigest: clipText(f.GetPresentedDigest()),
+			FirstSeen:       stampUnix(f.GetFirstSeenUnix()),
+			LastSeen:        stampUnix(f.GetLastSeenUnix()),
+			Count:           f.GetCount(),
+		})
+	}
+	// Open means any open finding, of either kind, or a closed lock. The
+	// counts are the executor's full counts, not the shown subset.
+	switch {
+	case r.GetLocked() || len(findings) > 0 || len(tamper) > 0:
+		v.Verdict = verdictOpen
+	case lr != nil && lr.GetComplete():
+		v.Verdict = verdictClean
+	default:
+		v.Verdict = verdictUnconfirmed
 	}
 	return v
 }
@@ -398,18 +496,25 @@ var integrityPageTmpl = template.Must(template.New("integrity").Parse(`<!doctype
 <dt>Periodische Prüfung läuft</dt><dd>{{.Executor.Running}}</dd>
 <dt>Läufe gesamt</dt><dd>{{.Executor.TotalRuns}}</dd>
 <dt>Sperre</dt><dd>{{if .Executor.Locked}}gesperrt seit {{.Executor.LockedSince}}{{else}}nicht gesperrt{{end}}</dd>
+<dt>Bewertung</dt><dd>{{.Executor.Verdict}}</dd>
 </dl>
 {{- with .Executor.LastRun}}
 <h3>Letzter Lauf</h3>
 <dl>
 <dt>Begonnen</dt><dd>{{.Started}}</dd>
 <dt>Beendet</dt><dd>{{.Finished}}</dd>
+{{- if .State}}
+<dt>Zustand des Laufs (Executor)</dt><dd>{{.State}}</dd>
+{{- end}}
 <dt>Vollständig</dt><dd>{{.Complete}}</dd>
 {{- if .Incomplete}}
 <dt>Unvollständig</dt><dd>{{.Incomplete}}</dd>
 {{- end}}
 {{- if .ReleaseVersion}}
 <dt>Release</dt><dd>{{.ReleaseVersion}}</dd>
+{{- end}}
+{{- if .ManifestSHA256}}
+<dt>Manifest-SHA-256</dt><dd>{{.ManifestSHA256}}</dd>
 {{- end}}
 <dt>Dateien</dt><dd>{{.Files}}</dd>
 <dt>Abweichend</dt><dd>{{.Different}}</dd>
@@ -432,6 +537,17 @@ var integrityPageTmpl = template.Must(template.New("integrity").Parse(`<!doctype
 {{- end}}
 {{- if .Executor.FindingsOmitted}}
 <p>{{.Executor.FindingsOmitted}} weitere Befunde nicht angezeigt.</p>
+{{- end}}
+{{- if .Executor.BaselineTamper}}
+<h3>Offene Baseline-Abweichungen (I2)</h3>
+<ul>
+{{- range .Executor.BaselineTamper}}
+<li>Host {{.HostID}}: berechneter Digest {{.PresentedDigest}} (seit {{.FirstSeen}}, {{.Count}}×)</li>
+{{- end}}
+</ul>
+{{- end}}
+{{- if .Executor.TamperOmitted}}
+<p>{{.Executor.TamperOmitted}} weitere Baseline-Abweichungen nicht angezeigt.</p>
 {{- end}}
 {{- end}}
 </section>

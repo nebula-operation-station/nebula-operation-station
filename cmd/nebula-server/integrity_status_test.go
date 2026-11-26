@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -328,6 +329,161 @@ func TestIntegrityPageClipsExecutorText(t *testing.T) {
 // are repaired, and text longer than integrityTextLimit is cut and
 // marked. Protobuf rejects invalid UTF-8 on the wire, so this is the
 // defence for the text that does get through.
+// TestExecutorTamperFindingsAreNotClean: open I2 baseline tamper findings
+// make the executor's verdict "offene Befunde" and are shown, even with the
+// lock open and no I1 finding (ADR 0015 D7). The executor refuses the whole
+// status in that case, so the page must never show it as clean.
+func TestExecutorTamperFindingsAreNotClean(t *testing.T) {
+	m := releaseMonitorRun(t)
+	last := time.Date(2026, 11, 26, 9, 0, 0, 0, time.UTC).Unix()
+	l := integrityLazy(t, &integrityFake{resp: &pb.GetIntegrityStatusResponse{
+		Configured: true,
+		LastRun:    &pb.IntegrityRun{StartedUnix: last, FinishedUnix: last + 60, Complete: true},
+		BaselineTamperFindings: []*pb.BaselineTamperFinding{{
+			HostId: "host-7", PresentedDigest: "sha256:abcdef", FirstSeenUnix: last, LastSeenUnix: last, Count: 2,
+		}},
+	}})
+	srv := integrityHTML(t, m, lazyIntegrityStatus(l))
+
+	_, body := fetchIntegrityPage(t, srv.URL, "text/html")
+	exec := pageSection(t, body, "executor-status", "")
+	if !strings.Contains(exec, "host-7") || !strings.Contains(exec, "offene Befunde") {
+		t.Errorf("tamper finding not shown as open: %q", exec)
+	}
+	if strings.Contains(exec, "sauber") {
+		t.Errorf("executor with open tamper finding shown as clean")
+	}
+
+	_, jsonBody := fetchIntegrityPage(t, srv.URL, "")
+	var got integrityStatusJSON
+	if err := json.Unmarshal([]byte(jsonBody), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Executor.Available || got.Executor.Verdict != verdictOpen {
+		t.Fatalf("executor part %+v, want available with verdict %q", got.Executor, verdictOpen)
+	}
+	if len(got.Executor.BaselineTamper) != 1 || got.Executor.BaselineTamper[0].HostID != "host-7" ||
+		got.Executor.BaselineTamper[0].Count != 2 {
+		t.Fatalf("tamper findings %+v", got.Executor.BaselineTamper)
+	}
+}
+
+// TestExecutorWithoutOpenFindingsIsClean: a complete last run with no open
+// I1 or I2 findings and an open lock is the only way to a clean verdict.
+func TestExecutorWithoutOpenFindingsIsClean(t *testing.T) {
+	m := releaseMonitorRun(t)
+	l := integrityLazy(t, &integrityFake{resp: &pb.GetIntegrityStatusResponse{
+		Configured: true,
+		LastRun:    &pb.IntegrityRun{Complete: true, Files: 10},
+	}})
+	srv := integrityHTML(t, m, lazyIntegrityStatus(l))
+
+	_, jsonBody := fetchIntegrityPage(t, srv.URL, "")
+	var got integrityStatusJSON
+	if err := json.Unmarshal([]byte(jsonBody), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Executor.Available || got.Executor.Verdict != verdictClean || len(got.Executor.BaselineTamper) != 0 {
+		t.Fatalf("executor part %+v, want available and clean", got.Executor)
+	}
+}
+
+// TestExecutorWithoutCompleteRunIsNotClean: with no last run, or an
+// incomplete one, the executor has not confirmed anything, so the verdict
+// is "nicht bestätigt", never "sauber".
+func TestExecutorWithoutCompleteRunIsNotClean(t *testing.T) {
+	cases := []struct {
+		name string
+		resp *pb.GetIntegrityStatusResponse
+	}{
+		{"no last run", &pb.GetIntegrityStatusResponse{Configured: true, TotalRuns: 1}},
+		{"incomplete last run", &pb.GetIntegrityStatusResponse{Configured: true,
+			LastRun: &pb.IntegrityRun{Complete: false, Incomplete: "no-admitted-reference"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := releaseMonitorRun(t)
+			srv := integrityHTML(t, m, lazyIntegrityStatus(integrityLazy(t, &integrityFake{resp: tc.resp})))
+			_, jsonBody := fetchIntegrityPage(t, srv.URL, "")
+			var got integrityStatusJSON
+			if err := json.Unmarshal([]byte(jsonBody), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Executor.Verdict != verdictUnconfirmed {
+				t.Fatalf("verdict %q, want %q", got.Executor.Verdict, verdictUnconfirmed)
+			}
+		})
+	}
+}
+
+// TestExecutorEmptyReplyIsUnavailable: a reply without any field set is not
+// a status; it gives the unavailable view and never Available=true.
+func TestExecutorEmptyReplyIsUnavailable(t *testing.T) {
+	m := releaseMonitorRun(t)
+	srv := integrityHTML(t, m, lazyIntegrityStatus(integrityLazy(t, &integrityFake{resp: &pb.GetIntegrityStatusResponse{}})))
+	_, body := fetchIntegrityPage(t, srv.URL, "text/html")
+	if exec := pageSection(t, body, "executor-status", ""); !strings.Contains(exec, "nicht verfügbar") {
+		t.Errorf("empty reply not shown as unavailable: %q", exec)
+	}
+	_, jsonBody := fetchIntegrityPage(t, srv.URL, "")
+	var got integrityStatusJSON
+	if err := json.Unmarshal([]byte(jsonBody), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Executor.Available || got.Executor.Verdict != "" {
+		t.Fatalf("executor part %+v, want unavailable", got.Executor)
+	}
+}
+
+// TestExecutorRunStateIsCarried: the executor's own verdict for its last run
+// (state) and the manifest digest are shown, not only the counts.
+func TestExecutorRunStateIsCarried(t *testing.T) {
+	m := releaseMonitorRun(t)
+	const digest = "sha256:0123456789abcdef"
+	l := integrityLazy(t, &integrityFake{resp: &pb.GetIntegrityStatusResponse{
+		Configured: true,
+		LastRun:    &pb.IntegrityRun{Complete: true, State: "differences-found", ManifestSha256: digest},
+	}})
+	srv := integrityHTML(t, m, lazyIntegrityStatus(l))
+
+	_, body := fetchIntegrityPage(t, srv.URL, "text/html")
+	exec := pageSection(t, body, "executor-status", "")
+	if !strings.Contains(exec, "differences-found") || !strings.Contains(exec, digest) {
+		t.Errorf("executor run state or digest missing: %q", exec)
+	}
+	_, jsonBody := fetchIntegrityPage(t, srv.URL, "")
+	var got integrityStatusJSON
+	if err := json.Unmarshal([]byte(jsonBody), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Executor.LastRun == nil || got.Executor.LastRun.State != "differences-found" ||
+		got.Executor.LastRun.ManifestSHA256 != digest {
+		t.Fatalf("last run %+v", got.Executor.LastRun)
+	}
+}
+
+// TestExecutorReadFailureIsLogged: a failed executor read leaves a fixed
+// warning in the log, without the error text (which may hold secrets).
+func TestExecutorReadFailureIsLogged(t *testing.T) {
+	var buf bytes.Buffer
+	lg := slog.New(slog.NewTextHandler(&buf, nil))
+	m := releaseMonitorRun(t)
+	read := lazyIntegrityStatus(integrityLazy(t, &integrityFake{err: status.Error(codes.Internal, "boom /secret/path")}))
+	p := integrityStatusPage{monitor: m, read: read, now: time.Now, log: lg}
+	srv := httptest.NewServer(http.HandlerFunc(p.serve))
+	t.Cleanup(srv.Close)
+	_, body := fetchIntegrityPage(t, srv.URL, "text/html")
+	if !strings.Contains(pageSection(t, body, "executor-status", ""), "nicht verfügbar") {
+		t.Fatalf("executor block does not say unavailable")
+	}
+	if !strings.Contains(buf.String(), integrityReadFailedMsg) {
+		t.Errorf("failed read not logged: %q", buf.String())
+	}
+	if strings.Contains(buf.String(), "/secret/path") || strings.Contains(buf.String(), "boom") {
+		t.Errorf("error text logged: %q", buf.String())
+	}
+}
+
 func TestClipTextRepairsAndLimits(t *testing.T) {
 	cases := []struct {
 		name string
