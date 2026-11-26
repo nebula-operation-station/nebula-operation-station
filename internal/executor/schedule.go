@@ -296,9 +296,11 @@ func checkReadAction(actionID string) error {
 // both revocations like an attached dispatch (the claim is rechecked and
 // spent under the read guard), so once Lock or a revocation has returned
 // no job of a claim made before it starts. The job itself runs after the
-// guard is released: lifecycle calls never wait for it. Like every durable
-// job (spec 07) it is not cancelled by a later Lock or revocation; the
-// reconciler collects its outcome (once the keyring is unlocked).
+// guard is released: lifecycle calls never wait for it. A job dispatched
+// before a Lock or a revocation runs to its end; its result is collected
+// and used, and the run counts against the lease budget (ADR 0007, decision
+// note 2026-11-26, option (a)). The reconciler collects it only while the
+// keyring is unlocked (collectFimScan).
 //
 // The response carries the run's class and state only, never the result
 // document: the reconciler reads that with the fim.scan limit.
@@ -317,6 +319,7 @@ func (s *Service) dispatchDurableRead(ctx context.Context, dispatch func(permit.
 	defer cancel()
 	defer closeReadConnectionOnCancel(dispatchCtx, c)()
 	var finish *executordb.Run
+	notRecorded := false
 	err := dispatch(grant, func() error {
 		if err := recheck(dispatchCtx); err != nil {
 			return err
@@ -326,6 +329,7 @@ func (s *Service) dispatchDurableRead(ctx context.Context, dispatch func(permit.
 		if err := s.db.CreateRun(executordb.Run{ExecutionID: id, HostID: host, Digest: label, Endpoints: req.GetEndpoints(),
 			Fingerprint: r.GetHostKeyFingerprint(), Timeout: timeout, ActionID: permit.FimScanActionID}); err != nil {
 			s.log.Error("audit", "kind", "store_error", "op", "create_run", "digest", label, "host", host, "detail", err.Error())
+			notRecorded = true
 			return status.Error(codes.Unavailable, "storage_error: the read was authorized but could not be recorded; it was not started")
 		}
 		s.log.Info("audit", "kind", "run_dispatching", "digest", label, "host", host, "execution", id)
@@ -338,10 +342,7 @@ func (s *Service) dispatchDurableRead(ctx context.Context, dispatch func(permit.
 		s.finishRun(*finish)
 	}
 	if err != nil {
-		resp.Class, resp.Detail = "read_denied", "read authority changed before dispatch"
-		if permit.CodeOf(err) == "" && status.Code(err) == codes.Unavailable {
-			resp.Class, resp.Detail = classNotExecuted, "the read could not be recorded"
-		}
+		resp.Class, resp.Detail = durableReadRefusal(err, notRecorded)
 		resp.DurationMs = time.Since(start).Milliseconds()
 		s.auditScheduled(label, id, host, resp)
 		if permit.CodeOf(err) != "" {
@@ -358,7 +359,28 @@ func (s *Service) dispatchDurableRead(ctx context.Context, dispatch func(permit.
 		resp.Detail += ": " + st.GetDetail()
 	}
 	resp.DurationMs = time.Since(start).Milliseconds()
+	// The run's own run_finished record follows when the reconciler closes
+	// it; this one records the read that started it.
+	s.auditScheduledKind("read_dispatched_durable", label, id, host, resp)
 	return &pb.RunScheduledResponse{ExecutionId: id, Result: resp}, nil
+}
+
+// durableReadRefusal names why a durable read was not dispatched: the
+// authority refused (a lease or lifecycle code), the run could not be
+// recorded, a local recheck refused (pin or credential changed), or another
+// local error (storage, cancellation) stopped it. The audit then names the
+// actual cause.
+func durableReadRefusal(err error, notRecorded bool) (class, detail string) {
+	switch {
+	case permit.CodeOf(err) != "":
+		return "read_denied", "read authority changed before dispatch"
+	case notRecorded:
+		return classNotExecuted, "the read could not be recorded"
+	case status.Code(err) == codes.PermissionDenied:
+		return "read_denied", status.Convert(err).Message()
+	default:
+		return classNotExecuted, "the read was not dispatched: " + boundReason(status.Convert(err).Message())
+	}
 }
 
 // maxConcurrentReads is an executor-wide ceiling, never multiplied by grants
@@ -391,7 +413,12 @@ func closeReadConnectionOnCancel(ctx context.Context, c io.Closer) func() {
 const zeroDigest = "0000000000000000000000000000000000000000000000000000000000000000"
 
 func (s *Service) auditScheduled(label, id, host string, r *pb.RunAttachedResponse) {
-	s.log.Info("audit", "kind", "run_finished", "digest", label, "execution", id, "host", host, "class", r.GetClass(),
+	s.auditScheduledKind("run_finished", label, id, host, r)
+}
+
+// auditScheduledKind writes the scheduled-read audit record of kind.
+func (s *Service) auditScheduledKind(kind, label, id, host string, r *pb.RunAttachedResponse) {
+	s.log.Info("audit", "kind", kind, "digest", label, "execution", id, "host", host, "class", r.GetClass(),
 		"exit", r.GetExitCode(), "endpoint", r.GetEndpoint(), "result_bytes", len(r.GetResult()), "log_bytes", len(r.GetLog()),
 		"log_truncated", r.GetLogTruncated(), "duration_ms", r.GetDurationMs())
 }

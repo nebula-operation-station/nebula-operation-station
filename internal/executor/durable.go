@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"time"
 
@@ -244,7 +243,13 @@ func (s *Service) ReconcileOnce(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if s.isDispatching(run.ExecutionID + "/" + run.HostID) {
+		// A Lock during the pass stops it before the next host connection
+		// (ADR 0007, decision note 2026-11-26): open runs wait for unlock.
+		if !s.keys.Unlocked() {
+			return
+		}
+		key := run.ExecutionID + "/" + run.HostID
+		if s.isDispatching(key) || s.isCollecting(key) {
 			continue
 		}
 		s.reconcile(ctx, run)
@@ -317,7 +322,13 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 			"attempt", attempt, "next_try_in", int(nextIn.Round(time.Second).Seconds()))
 		return
 	}
-	defer c.Close()
+	// A fim.scan collect takes the connection over (startFimCollect).
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			_ = c.Close()
+		}
+	}()
 	s.clearFailoverAudited(key)
 	if waiting {
 		id, err := hostrun.BootID(ctx, c.Client, s.jobs)
@@ -340,8 +351,9 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 			"attempt", attempt, "next_try_in", int(nextIn.Round(time.Second).Seconds()))
 		return
 	}
-	// The host is checkable again: the failure streak ends.
-	s.clearReconcileBackoff(key)
+	// The host is checkable again: the failure streak ends (failed collect
+	// attempts are counted on).
+	s.clearCheckBackoff(key)
 	since := run.DispatchedAt
 	if since.IsZero() {
 		since = run.CreatedAt
@@ -397,7 +409,7 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 		}
 	case "finished":
 		if run.ActionID == permit.FimScanActionID {
-			s.collectFimScan(ctx, c, run, fin, st.ExitCode, check)
+			handedOff = s.startFimCollect(ctx, c, run, fin, st.ExitCode, check)
 			return
 		}
 		res, err := hostrun.Collect(ctx, c.Client, s.jobs, run.ExecutionID, st.ExitCode)
@@ -434,28 +446,200 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 	}
 }
 
+// Collecting a fim.scan result (ADR 0007, decision note 2026-11-26). A job
+// dispatched before a Lock or a revocation runs to its end; its result is
+// collected and used like any other run's. While the executor is locked no
+// collect touches the host: a collect in progress is aborted at Lock and
+// the run stays open until a pass after unlock.
+const (
+	// fimCollectTimeout bounds one collect of a fim.scan result (document
+	// and log), measured on the service clock and in real time. The
+	// stream itself may take up to about 19 minutes for a 128 MiB document
+	// at hostrun's minimum rate.
+	fimCollectTimeout = 20 * time.Minute
+	// maxFimCollectAttempts is how many collects of one run may fail
+	// (error or time limit; a Lock abort does not count) before the run is
+	// closed as classCollectFailed.
+	maxFimCollectAttempts = 3
+	// maxConcurrentCollects bounds the fim.scan collects in flight; a run
+	// beyond it waits for a later pass.
+	maxConcurrentCollects = 2
+	// collectWatchInterval is how often a running collect checks the
+	// keyring lock and its time limit.
+	collectWatchInterval = 50 * time.Millisecond
+	// classCollectFailed closes a fim.scan run whose result could not be
+	// collected within maxFimCollectAttempts.
+	classCollectFailed = "collect_failed"
+	// collectMarkPrefix marks an in-flight collect in the dispatching set.
+	collectMarkPrefix = "collect/"
+)
+
+var (
+	// errCollectLocked aborts a collect because the executor was locked.
+	errCollectLocked = errors.New("executor locked during collect")
+	// errCollectTimeout aborts a collect that passed fimCollectTimeout.
+	errCollectTimeout = errors.New("collect time limit passed")
+)
+
+// markCollecting records an in-flight collect of the run key and reports
+// whether it may start: not already collecting and below
+// maxConcurrentCollects.
+func (s *Service) markCollecting(key string) bool {
+	s.dispatchMu.Lock()
+	defer s.dispatchMu.Unlock()
+	if s.dispatching == nil {
+		s.dispatching = map[string]bool{}
+	}
+	if s.dispatching[collectMarkPrefix+key] {
+		return false
+	}
+	n := 0
+	for k := range s.dispatching {
+		if strings.HasPrefix(k, collectMarkPrefix) {
+			n++
+		}
+	}
+	if n >= maxConcurrentCollects {
+		return false
+	}
+	s.dispatching[collectMarkPrefix+key] = true
+	return true
+}
+
+func (s *Service) unmarkCollecting(key string) {
+	s.setDispatching(collectMarkPrefix+key, false)
+}
+
+// isCollecting reports whether a collect of the run key is in flight.
+func (s *Service) isCollecting(key string) bool {
+	return s.isDispatching(collectMarkPrefix + key)
+}
+
+// startFimCollect starts collecting a finished fim.scan run over c in its
+// own goroutine, so a slow host never holds reconcileMu or the pass over
+// other runs. It reports whether it took c over (and closes it); false
+// leaves the run for a later pass.
+func (s *Service) startFimCollect(ctx context.Context, c *sshtransport.Client, run, fin executordb.Run, exitCode int, check string) bool {
+	key := run.ExecutionID + "/" + run.HostID
+	if !s.markCollecting(key) {
+		return false
+	}
+	go func() {
+		defer s.unmarkCollecting(key)
+		s.collectFimScan(ctx, c, run, fin, exitCode, check)
+	}()
+	return true
+}
+
+// lockCheckWriter discards the checked result bytes and aborts the stream
+// at the first chunk that arrives while the executor is locked.
+type lockCheckWriter struct{ s *Service }
+
+func (w lockCheckWriter) Write(p []byte) (int, error) {
+	if !w.s.keys.Unlocked() {
+		return 0, errCollectLocked
+	}
+	return len(p), nil
+}
+
 // collectFimScan closes a finished fim.scan run (a durable read, see
-// dispatchDurableRead). Its result is read with the fim.scan document limit
-// (hostrun.MaxDurableResultLimit, 128 MiB), streamed and checked as it
-// passes, never buffered: the run keeps class, exit status and the bounded
-// log, never the document (MaxResponseSize is 64 MiB, the document up to
-// 128 MiB). No integrity intake is wired to the executor yet
+// dispatchDurableRead) and closes c. Its result is read with the fim.scan
+// document limit (hostrun.MaxDurableResultLimit, 128 MiB), streamed and
+// checked as it passes, never buffered: the run keeps class, exit status
+// and the bounded log, never the document (MaxResponseSize is 64 MiB, the
+// document up to 128 MiB). No integrity intake is wired to the executor yet
 // (docs/implementation/integrity-wiring-decisions.md, 3.2), so the checked
 // bytes go nowhere and the detail says so.
+//
+// The collect is bounded by fimCollectTimeout and aborted at Lock (checked
+// before it starts, every collectWatchInterval and before each streamed
+// chunk); an aborted collect leaves the run open. A failed collect is
+// retried on later passes up to maxFimCollectAttempts, then the run is
+// closed as classCollectFailed.
 func (s *Service) collectFimScan(ctx context.Context, c *sshtransport.Client, run, fin executordb.Run, exitCode int, check string) {
-	res, err := hostrun.CollectStream(ctx, c.Client, s.jobs, run.ExecutionID, exitCode, hostrun.MaxDurableResultLimit, io.Discard)
-	if err != nil {
-		s.log.Warn("audit", "kind", "reconcile_collect_failed", "execution", run.ExecutionID, "host", run.HostID, "detail", err.Error())
+	key := run.ExecutionID + "/" + run.HostID
+	base, abort := context.WithCancelCause(ctx)
+	defer abort(nil)
+	collectCtx, stop := context.WithTimeoutCause(base, fimCollectTimeout, errCollectTimeout)
+	defer stop()
+	// The connection is closed when the collect ends or is aborted: a
+	// stalled session cannot outlive the abort.
+	defer closeReadConnectionOnCancel(collectCtx, c)()
+	if !s.keys.Unlocked() {
+		s.log.Info("audit", "kind", "reconcile_collect_paused", "execution", run.ExecutionID, "host", run.HostID, "detail", "executor locked")
 		return
 	}
+	start := s.clock()
+	s.log.Info("audit", "kind", "reconcile_collect_started", "execution", run.ExecutionID, "host", run.HostID)
+	go func() {
+		t := time.NewTicker(collectWatchInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-collectCtx.Done():
+				return
+			case <-t.C:
+			}
+			if !s.keys.Unlocked() {
+				abort(errCollectLocked)
+				return
+			}
+			if s.clock().Sub(start) > fimCollectTimeout {
+				abort(errCollectTimeout)
+				return
+			}
+		}
+	}()
+	res, err := hostrun.CollectStream(collectCtx, c.Client, s.jobs, run.ExecutionID, exitCode, hostrun.MaxDurableResultLimit, lockCheckWriter{s})
+	if err != nil {
+		cause := context.Cause(collectCtx)
+		switch {
+		case errors.Is(err, errCollectLocked) || errors.Is(cause, errCollectLocked) || !s.keys.Unlocked():
+			// Not a failure: resumed by a pass after unlock.
+			s.log.Info("audit", "kind", "reconcile_collect_paused", "execution", run.ExecutionID, "host", run.HostID, "detail", "executor locked")
+			return
+		case ctx.Err() != nil:
+			// The reconciler is shutting down; the run stays open.
+			return
+		}
+		reason := err.Error()
+		if errors.Is(cause, errCollectTimeout) {
+			reason = fmt.Sprintf("the collect did not finish within %s", fimCollectTimeout)
+		}
+		attempt := s.noteCollectFailure(key)
+		if attempt < maxFimCollectAttempts {
+			s.log.Warn("audit", "kind", "reconcile_collect_failed", "execution", run.ExecutionID, "host", run.HostID,
+				"detail", boundReason(reason), "attempt", attempt, "max_attempts", maxFimCollectAttempts)
+			return
+		}
+		s.clearReconcileBackoff(key)
+		fin.Class = classCollectFailed
+		fin.Detail = fmt.Sprintf("the fim-scan result could not be collected in %d attempts (last: %s); the job ran, its result is not used",
+			attempt, boundReason(reason))
+		s.log.Warn("audit", "kind", "reconcile_collect_gave_up", "execution", run.ExecutionID, "host", run.HostID,
+			"detail", fin.Detail, "attempts", attempt)
+		s.finishRunChecked(fin, check)
+		s.removeCollectedJob(collectCtx, c, run)
+		return
+	}
+	s.clearReconcileBackoff(key)
 	fin.Class, fin.Detail, fin.ExitCode = res.Class, res.Detail, res.ExitCode
 	fin.Log, fin.LogTruncated = res.Log, res.LogTruncated
 	if res.Class == hostrun.ClassSuccess {
 		fin.Detail = fmt.Sprintf("fim-scan document of %d bytes checked; not kept: no integrity intake is wired", res.Bytes)
 	}
 	s.finishRunChecked(fin, check)
-	// Stored: the job directory can go (the tmpfiles rule is the fallback,
-	// spec 07).
+	s.removeCollectedJob(collectCtx, c, run)
+}
+
+// removeCollectedJob removes the job directory of a closed fim.scan run
+// (the tmpfiles rule is the fallback, spec 07). It does not touch the host
+// once the executor is locked.
+func (s *Service) removeCollectedJob(ctx context.Context, c *sshtransport.Client, run executordb.Run) {
+	if !s.keys.Unlocked() {
+		s.log.Info("audit", "kind", "job_cleanup_skipped", "execution", run.ExecutionID, "host", run.HostID, "detail", "executor locked")
+		return
+	}
 	if err := hostrun.Remove(ctx, c.Client, s.jobs, run.ExecutionID); err != nil {
 		s.log.Warn("audit", "kind", "job_cleanup_failed", "execution", run.ExecutionID, "host", run.HostID, "detail", err.Error())
 	}
@@ -495,6 +679,9 @@ type reconcileBackoffState struct {
 	attempts  int
 	firstFail time.Time
 	lastTry   time.Time
+	// collectFails counts failed fim.scan collects of the run; it survives
+	// a successful check (clearCheckBackoff).
+	collectFails int
 }
 
 // reconcileDeadline is when a run that is not waiting for a reboot stops
@@ -558,8 +745,11 @@ func (s *Service) noteReconcileFailure(key string, now time.Time) (int, time.Dur
 	}
 	st, ok := s.reconcileBackoff[key]
 	if !ok {
-		st = &reconcileBackoffState{firstFail: now}
+		st = &reconcileBackoffState{}
 		s.reconcileBackoff[key] = st
+	}
+	if st.firstFail.IsZero() {
+		st.firstFail = now
 	}
 	st.attempts++
 	st.lastTry = now
@@ -573,6 +763,40 @@ func (s *Service) clearReconcileBackoff(key string) {
 	defer s.reconcileBackoffMu.Unlock()
 	delete(s.reconcileBackoff, key)
 	delete(s.failoverAudited, key)
+}
+
+// clearCheckBackoff ends the check failure streak of a run that was checked
+// successfully, keeping its count of failed collects.
+func (s *Service) clearCheckBackoff(key string) {
+	s.reconcileBackoffMu.Lock()
+	defer s.reconcileBackoffMu.Unlock()
+	delete(s.failoverAudited, key)
+	st, ok := s.reconcileBackoff[key]
+	if !ok {
+		return
+	}
+	if st.collectFails == 0 {
+		delete(s.reconcileBackoff, key)
+		return
+	}
+	st.attempts, st.firstFail, st.lastTry = 0, time.Time{}, time.Time{}
+}
+
+// noteCollectFailure records one failed collect of a run and returns the
+// number of failed collects so far.
+func (s *Service) noteCollectFailure(key string) int {
+	s.reconcileBackoffMu.Lock()
+	defer s.reconcileBackoffMu.Unlock()
+	if s.reconcileBackoff == nil {
+		s.reconcileBackoff = map[string]*reconcileBackoffState{}
+	}
+	st, ok := s.reconcileBackoff[key]
+	if !ok {
+		st = &reconcileBackoffState{}
+		s.reconcileBackoff[key] = st
+	}
+	st.collectFails++
+	return st.collectFails
 }
 
 // markFailoverAudited records that the failed failover of the run key is

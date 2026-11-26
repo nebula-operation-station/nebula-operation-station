@@ -6,10 +6,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -188,7 +192,7 @@ func (f *fimLeaseEnv) waitJobFinished(id string) {
 }
 
 // reconcileUntilFinished runs reconcile passes (bounded) until the run is
-// closed and returns it.
+// closed and its collect has ended, and returns it.
 func (f *fimLeaseEnv) reconcileUntilFinished(id string) executordb.Run {
 	f.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -196,7 +200,7 @@ func (f *fimLeaseEnv) reconcileUntilFinished(id string) executordb.Run {
 	deadline := time.Now().Add(60 * time.Second)
 	for {
 		f.svc.ReconcileOnce(ctx)
-		if r := f.getRun(id); r.State == executordb.RunFinished {
+		if r := f.getRun(id); r.State == executordb.RunFinished && !f.svc.isCollecting(id+"/"+f.host) {
 			return r
 		}
 		if time.Now().After(deadline) {
@@ -278,12 +282,17 @@ func TestFimScanLeaseRunsAsDurableJobOutsideReadGuard(t *testing.T) {
 	if got := len(f.logs.find("run_dispatched", id)); got != 1 {
 		t.Fatalf("run_dispatched audit records = %d, want 1", got)
 	}
+	// The read that started the job has its own scheduled-read record.
+	recs := f.logs.find("read_dispatched_durable", id)
+	if len(recs) != 1 || recs[0].attrs["digest"] != "grant:"+f.grantID || recs[0].attrs["endpoint"] != f.ssh.addr {
+		t.Fatalf("read_dispatched_durable audit records: %+v", recs)
+	}
 }
 
 // TestFimScanLeaseRevocationDuringDurableJob: a revocation returns at once
 // while the job runs and stops every further run. The running job is not
-// cancelled: like every durable job (spec 07, reconcile-first) it runs to
-// its end and the reconciler collects its outcome.
+// cancelled: it runs to its end and the reconciler collects its outcome,
+// which is used normally (ADR 0007, decision note 2026-11-26, option (a)).
 func TestFimScanLeaseRevocationDuringDurableJob(t *testing.T) {
 	f := newFimLeaseEnv(t, false)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -305,8 +314,8 @@ func TestFimScanLeaseRevocationDuringDurableJob(t *testing.T) {
 
 // TestFimScanLeaseLockDuringDurableJob: Lock returns at once while the job
 // runs and pauses every further run. The running job is not cancelled; its
-// outcome is collected once the keyring is unlocked again (the reconciler
-// needs the keys).
+// outcome is collected once the keyring is unlocked again (ADR 0007,
+// decision note 2026-11-26, option (a)).
 func TestFimScanLeaseLockDuringDurableJob(t *testing.T) {
 	f := newFimLeaseEnv(t, true)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -359,6 +368,315 @@ func TestFimScanLeaseUnreachableHostSpendsReservation(t *testing.T) {
 	f.clock.Add(31 * time.Minute)
 	if _, err := f.client.RunReadGrant(ctx, r); err != nil {
 		t.Fatalf("read after the floor: %v", err)
+	}
+}
+
+// stallResult replaces the finished job's result.json with a FIFO that no
+// one writes, so a collect blocks in its result read. The returned restore
+// (also run at cleanup) unblocks every reader and puts the result back.
+func (f *fimLeaseEnv) stallResult(id string) func() {
+	f.t.Helper()
+	res := filepath.Join(f.jobs.JobRoot, id, "result.json")
+	if err := os.Rename(res, res+".held"); err != nil {
+		f.t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(res, 0o600); err != nil {
+		f.t.Fatal(err)
+	}
+	var once sync.Once
+	restore := func() {
+		once.Do(func() {
+			// Opening the FIFO for writing and closing it gives every
+			// blocked reader EOF.
+			if w, err := os.OpenFile(res, os.O_RDWR, 0); err == nil {
+				_ = w.Close()
+			}
+			_ = os.Remove(res)
+			if err := os.Rename(res+".held", res); err != nil && !errors.Is(err, os.ErrNotExist) {
+				f.t.Errorf("restore result: %v", err)
+			}
+		})
+	}
+	f.t.Cleanup(restore)
+	return restore
+}
+
+// waitLogs waits (bounded) until at least n audit records of kind exist for
+// the execution.
+func (f *fimLeaseEnv) waitLogs(kind, id string, n int) {
+	f.t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for len(f.logs.find(kind, id)) < n {
+		if time.Now().After(deadline) {
+			f.t.Fatalf("%d %s audit records for %s, want %d", len(f.logs.find(kind, id)), kind, id, n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// waitCollectEnded waits (bounded) until no collect of the run is in flight.
+func (f *fimLeaseEnv) waitCollectEnded(id string) {
+	f.t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for f.svc.isCollecting(id + "/" + f.host) {
+		if time.Now().After(deadline) {
+			f.t.Fatalf("collect of %s still in flight", id)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// finishedScan starts a fim.scan run and lets its job finish on the host,
+// without the executor looking at it.
+func (f *fimLeaseEnv) finishedScan(ctx context.Context) string {
+	f.t.Helper()
+	id := f.startHeldScan(ctx)
+	f.release()
+	f.waitJobFinished(id)
+	return id
+}
+
+// TestFimScanCollectAbortedAtLockResumesAfterUnlock: a Lock aborts a
+// collect in progress at once and no collect touches the host while
+// locked; the run stays open (not failed) and is collected normally after
+// unlock (ADR 0007, decision note 2026-11-26).
+func TestFimScanCollectAbortedAtLockResumesAfterUnlock(t *testing.T) {
+	f := newFimLeaseEnv(t, true)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	id := f.finishedScan(ctx)
+	restore := f.stallResult(id)
+
+	f.svc.ReconcileOnce(ctx)
+	f.waitLogs("reconcile_collect_started", id, 1)
+	within(t, "Lock", func() {
+		if _, err := f.client.Lock(ctx, &pb.LockRequest{}); err != nil {
+			t.Errorf("lock: %v", err)
+		}
+	})
+	f.waitCollectEnded(id)
+	f.requireOpen(id)
+	f.waitLogs("reconcile_collect_paused", id, 1)
+	if n := len(f.logs.find("reconcile_collect_failed", id)); n != 0 {
+		t.Fatalf("a Lock abort counted as a failed collect (%d)", n)
+	}
+	if _, err := os.Stat(filepath.Join(f.jobs.JobRoot, id)); err != nil {
+		t.Fatalf("job directory gone after an aborted collect: %v", err)
+	}
+
+	// While locked no pass starts a collect.
+	f.svc.ReconcileOnce(ctx)
+	if n := len(f.logs.find("reconcile_collect_started", id)); n != 1 || f.svc.isCollecting(id+"/"+f.host) {
+		t.Fatalf("a collect started while locked (%d started)", n)
+	}
+	f.requireOpen(id)
+
+	restore()
+	if _, err := f.svc.keys.Unlock([]byte(testPassphrase)); err != nil {
+		t.Fatal(err)
+	}
+	f.requireScanCollected(ctx, f.reconcileUntilFinished(id))
+	if n := len(f.logs.find("reconcile_collect_started", id)); n != 2 {
+		t.Fatalf("collect starts = %d, want 2 (aborted, resumed)", n)
+	}
+}
+
+// TestFimScanCollectTimeLimitAndAttemptCap: a host that never delivers its
+// result neither holds reconcileMu nor the pass over other runs; each
+// collect ends at its time limit, and after maxFimCollectAttempts failed
+// collects the run is closed as collect_failed and audited.
+func TestFimScanCollectTimeLimitAndAttemptCap(t *testing.T) {
+	f := newFimLeaseEnv(t, false)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	id := f.finishedScan(ctx)
+	f.stallResult(id)
+
+	for i := 1; i <= maxFimCollectAttempts; i++ {
+		within(t, "ReconcileOnce", func() { f.svc.ReconcileOnce(ctx) })
+		f.waitLogs("reconcile_collect_started", id, i)
+		// The stalled collect holds no reconciliation lock.
+		if !f.svc.reconcileMu.TryLock() {
+			t.Fatal("reconcileMu held by a stalled collect")
+		}
+		f.svc.reconcileMu.Unlock()
+		// A second pass during the collect starts no second one.
+		within(t, "ReconcileOnce", func() { f.svc.ReconcileOnce(ctx) })
+		if n := len(f.logs.find("reconcile_collect_started", id)); n != i {
+			t.Fatalf("collect starts = %d during attempt %d", n, i)
+		}
+		f.clock.Add(fimCollectTimeout + time.Minute)
+		f.waitCollectEnded(id)
+		if i < maxFimCollectAttempts {
+			f.requireOpen(id)
+			if n := len(f.logs.find("reconcile_collect_failed", id)); n != i {
+				t.Fatalf("reconcile_collect_failed records = %d after attempt %d", n, i)
+			}
+		}
+	}
+	run := f.getRun(id)
+	if run.State != executordb.RunFinished || run.Class != classCollectFailed || run.ExitCode != -1 ||
+		!strings.Contains(run.Detail, "3 attempts") || !strings.Contains(run.Detail, "did not finish within") {
+		t.Fatalf("capped run: %+v", run)
+	}
+	if n := len(f.logs.find("reconcile_collect_gave_up", id)); n != 1 {
+		t.Fatalf("reconcile_collect_gave_up records = %d, want 1", n)
+	}
+	if recs := f.logs.find("run_finished", id); len(recs) != 1 || recs[0].attrs["class"] != classCollectFailed {
+		t.Fatalf("run_finished audit: %+v", recs)
+	}
+	// Closed: no further pass collects it.
+	f.svc.ReconcileOnce(ctx)
+	if n := len(f.logs.find("reconcile_collect_started", id)); n != maxFimCollectAttempts {
+		t.Fatalf("collect starts = %d after the cap", n)
+	}
+}
+
+// holdProxy forwards loopback TCP to target, but holds each connection
+// after accepting it until release: the client is then inside Connect,
+// after the read was authorized and before the dispatch guard.
+type holdProxy struct {
+	addr     string
+	accepted chan struct{}
+	release  func()
+}
+
+func startHoldProxy(t *testing.T, target string) *holdProxy {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := make(chan struct{})
+	var once sync.Once
+	p := &holdProxy{addr: ln.Addr().String(), accepted: make(chan struct{}, 1), release: func() { once.Do(func() { close(gate) }) }}
+	t.Cleanup(func() { p.release(); _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				select {
+				case p.accepted <- struct{}{}:
+				default:
+				}
+				<-gate
+				up, err := net.Dial("tcp", target)
+				if err != nil {
+					return
+				}
+				defer up.Close()
+				go func() { _, _ = io.Copy(up, conn); _ = up.Close() }()
+				_, _ = io.Copy(conn, up)
+			}()
+		}
+	}()
+	return p
+}
+
+// TestFimScanLeaseRevokeOrLockBeforeDispatchGuard: a revocation or a Lock
+// that lands after the read was authorized and while it connects (before
+// the dispatch guard) stops it: no run is stored and no job reaches the
+// host.
+func TestFimScanLeaseRevokeOrLockBeforeDispatchGuard(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop func(ctx context.Context, f *fimLeaseEnv) error
+	}{
+		{"revocation", func(ctx context.Context, f *fimLeaseEnv) error {
+			_, err := f.client.RevokeReadGrant(ctx, &pb.RevokeReadGrantRequest{GrantId: f.grantID})
+			return err
+		}},
+		{"lock", func(ctx context.Context, f *fimLeaseEnv) error {
+			_, err := f.client.Lock(ctx, &pb.LockRequest{})
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFimLeaseEnv(t, tc.name == "lock")
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			p := startHoldProxy(t, f.ssh.addr)
+			req := f.request(40 * time.Minute)
+			req.Endpoints = []string{p.addr}
+			type result struct {
+				resp *pb.RunReadGrantResponse
+				err  error
+			}
+			done := make(chan result, 1)
+			go func() {
+				resp, err := f.client.RunReadGrant(ctx, req)
+				done <- result{resp, err}
+			}()
+			select {
+			case <-p.accepted:
+			case <-time.After(30 * time.Second):
+				t.Fatal("the read never connected")
+			}
+			within(t, tc.name, func() {
+				if err := tc.stop(ctx, f); err != nil {
+					t.Errorf("%s: %v", tc.name, err)
+				}
+			})
+			p.release()
+			var got result
+			select {
+			case got = <-done:
+			case <-time.After(30 * time.Second):
+				t.Fatal("the read did not return")
+			}
+			if got.err == nil && got.resp.GetResult().GetClass() == "" {
+				t.Fatalf("read dispatched after %s: %v", tc.name, got.resp)
+			}
+			runs, err := f.db.OpenRuns()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(runs) != 0 {
+				t.Fatalf("runs stored after %s: %+v", tc.name, runs)
+			}
+			if id := got.resp.GetExecutionId(); id != "" {
+				if _, err := f.db.GetRun(id, f.host); !errors.Is(err, executordb.ErrNoRun) {
+					t.Fatalf("run stored after %s: %v", tc.name, err)
+				}
+			}
+			if entries, err := os.ReadDir(f.jobs.JobRoot); err == nil && len(entries) != 0 {
+				t.Fatalf("a job reached the host after %s: %v", tc.name, entries)
+			}
+			for _, kind := range []string{"run_dispatching", "run_dispatched", "read_dispatched_durable"} {
+				if n := len(f.logs.find(kind, "")); n != 0 {
+					t.Fatalf("%d %s audit records after %s", n, kind, tc.name)
+				}
+			}
+		})
+	}
+}
+
+// TestDurableReadRefusalNamesCause: the refusal of a durable read names its
+// actual cause; only a failed run record is reported as such.
+func TestDurableReadRefusalNamesCause(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		err         error
+		notRecorded bool
+		class       string
+		detail      string
+	}{
+		{"authority", &permit.Error{Code: permit.CodeLeaseBudget}, false, "read_denied", "read authority changed before dispatch"},
+		{"not recorded", status.Error(codes.Unavailable, "storage_error: x"), true, classNotExecuted, "the read could not be recorded"},
+		{"store error in recheck", status.Error(codes.Unavailable, "storage_error: host key"), false, classNotExecuted, "the read was not dispatched: storage_error: host key"},
+		{"pin changed", status.Error(codes.PermissionDenied, "read target pin changed before dispatch"), false, "read_denied", "read target pin changed before dispatch"},
+		{"canceled", status.Error(codes.Canceled, "read canceled before dispatch"), false, classNotExecuted, "the read was not dispatched: read canceled before dispatch"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			class, detail := durableReadRefusal(tc.err, tc.notRecorded)
+			if class != tc.class || detail != tc.detail {
+				t.Fatalf("got %q %q, want %q %q", class, detail, tc.class, tc.detail)
+			}
+		})
 	}
 }
 
