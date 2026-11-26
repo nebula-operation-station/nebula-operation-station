@@ -4,6 +4,7 @@ package executions
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 	"testing"
 	"time"
@@ -276,5 +277,129 @@ func TestFimScanCallDoesNotWaitForTheJob(t *testing.T) {
 	}
 	if cf.left <= 0 || cf.left > durableReadCallTimeout {
 		t.Fatalf("call deadline %s away, want at most %s", cf.left, durableReadCallTimeout)
+	}
+}
+
+// TestTwoLeasesOnOneHostShareTheFullFloor grants two leases that both bind
+// fim.scan full on the same host. The executor's floor is per host and mode,
+// so only one full run may be asked for per floor: the second lease waits for
+// the first lease's run, and the runner never asks the executor early.
+func TestTwoLeasesOnOneHostShareTheFullFloor(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	s, f := setupFimFloor(t, &now,
+		func(n time.Time) *pb.ReadGrant {
+			return leaseEntry(t, fimLeaseDoc(t, n, []string{"web"}, "full"), n)
+		},
+		func(n time.Time) *pb.ReadGrant {
+			doc := fimLeaseDoc(t, n, []string{"web"}, "full")
+			doc.ID = fimGrantB
+			return leaseEntry(t, doc, n)
+		})
+	ctx := context.Background()
+	for i := 0; i <= 8*24; i++ {
+		s.RunDueReadGrants(ctx)
+		now = now.Add(time.Hour)
+	}
+	if len(f.early) != 0 {
+		t.Fatalf("%d full fim.scan requests before the host's floor", len(f.early))
+	}
+	if len(f.times) != 2 {
+		t.Fatalf("%d accepted full runs on the host in eight days, want 2", len(f.times))
+	}
+	if gap := f.times[1].Sub(f.times[0]); gap < permit.FimScanFullMinInterval {
+		t.Fatalf("second full run %s after the first, want at least %s", gap, permit.FimScanFullMinInterval)
+	}
+}
+
+// jobFake is an executor whose durable fim.scan job ends only when final is
+// set: until then GetRun reports it running. Its release is recorded.
+type jobFake struct {
+	*leaseRunFake
+	final    *pb.RunStatus
+	released bool
+}
+
+func (f *jobFake) GetRun(_ context.Context, in *pb.GetRunRequest, _ ...grpc.CallOption) (*pb.GetRunResponse, error) {
+	if in.GetRelease() {
+		f.released = true
+		return &pb.GetRunResponse{Run: f.final}, nil
+	}
+	if f.final == nil {
+		return &pb.GetRunResponse{Run: &pb.RunStatus{State: "running"}}, nil
+	}
+	return &pb.GetRunResponse{Run: f.final}, nil
+}
+
+// TestFimScanJobIsRunningUntilItsOutcomeIsCollected checks that a fim.scan
+// read the executor started is stored as running, with no class and no finish
+// time, and that its real outcome is stored once the job has ended.
+func TestFimScanJobIsRunningUntilItsOutcomeIsCollected(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	s, f := setupLeases(t, &now, func(n time.Time) *pb.ReadGrant {
+		return leaseEntry(t, fimLeaseDoc(t, n, []string{"web"}, "full"), n)
+	})
+	jf := &jobFake{leaseRunFake: f}
+	s.exec = jf
+	ctx := context.Background()
+
+	s.RunDueReadGrants(ctx)
+	if len(f.runs) != 1 {
+		t.Fatalf("%d runs, want 1 fim.scan run", len(f.runs))
+	}
+	var state, class string
+	var durable int
+	var finished sql.NullInt64
+	if err := s.db.QueryRow(`SELECT h.state, h.class, e.durable, e.finished_at FROM execution_hosts h
+		JOIN executions e ON e.id = h.execution_id WHERE e.action_id = ? AND e.schedule_id = ?`,
+		permit.FimScanActionID, testGrantID).Scan(&state, &class, &durable, &finished); err != nil {
+		t.Fatal(err)
+	}
+	if state != "running" || class != "" || durable != 1 || finished.Valid {
+		t.Fatalf("while the job runs: host %q class %q durable %d finished %v; want running, no class, durable, unfinished",
+			state, class, durable, finished)
+	}
+
+	jf.final = &pb.RunStatus{State: "finished", Class: "script_failed", ExitCode: 3, Detail: "scan broke", Result: []byte(`{"ok":false}`)}
+	now = now.Add(time.Hour)
+	s.RunDueReadGrants(ctx)
+	var exitCode int
+	if err := s.db.QueryRow(`SELECT h.state, h.class, h.exit_code, e.finished_at FROM execution_hosts h
+		JOIN executions e ON e.id = h.execution_id WHERE e.action_id = ? AND e.schedule_id = ?`,
+		permit.FimScanActionID, testGrantID).Scan(&state, &class, &exitCode, &finished); err != nil {
+		t.Fatal(err)
+	}
+	if state != "finished" || class != "script_failed" || exitCode != 3 || !finished.Valid {
+		t.Fatalf("after the job ended: host %q class %q exit %d finished %v; want finished with the job's outcome",
+			state, class, exitCode, finished)
+	}
+	if !jf.released {
+		t.Fatal("the job's result was not released on the executor after it was stored")
+	}
+}
+
+// TestOnlyFimScanIsDurableInALease checks the runner's own durability rule for
+// every built-in action. The grant allowlist refuses the other durable actions
+// too, but that check is not the runner's, so the rule is tested on its own:
+// fim.scan is the one durable action a lease may run, and every attached
+// action is allowed. docker.update_preview is durable and read-only, so the
+// test fails if the rule admits every durable read-only action.
+func TestOnlyFimScanIsDurableInALease(t *testing.T) {
+	durableOther := 0
+	for _, a := range actions.Builtin {
+		ok := durableLeaseOK(a)
+		switch {
+		case a.ID == permit.FimScanActionID && !ok:
+			t.Errorf("fim.scan is refused by the lease runner")
+		case a.Durable && a.ID != permit.FimScanActionID:
+			durableOther++
+			if ok {
+				t.Errorf("%s is durable and runs from a read lease (read-only %v)", a.ID, a.ReadOnly)
+			}
+		case !a.Durable && !ok:
+			t.Errorf("%s is attached and refused by the lease runner", a.ID)
+		}
+	}
+	if durableOther == 0 {
+		t.Fatal("the catalog has no durable action besides fim.scan; the check ran on nothing")
 	}
 }

@@ -125,8 +125,7 @@ func ordinaryLeases(grants []*pb.ReadGrant, now time.Time, stored map[string][]b
 			a, ok := actions.Lookup(da.ActionID)
 			// Durable is allowed for fim.scan alone (decision (g) option 2);
 			// every other durable action stays out.
-			if !ok || a.Version != da.ModuleVersion || a.SHA256() != da.ArtifactSHA256 || !a.ReadOnly ||
-				a.Durable != (a.ID == permit.FimScanActionID) {
+			if !ok || a.Version != da.ModuleVersion || a.SHA256() != da.ArtifactSHA256 || !a.ReadOnly || !durableLeaseOK(a) {
 				continue
 			}
 			params, ok := leaseActionParams(a, da, empty, stored[l.id])
@@ -150,6 +149,15 @@ func ordinaryLeases(grants []*pb.ReadGrant, now time.Time, stored map[string][]b
 		out = append(out, l)
 	}
 	return out
+}
+
+// durableLeaseOK reports whether a read lease may run a built-in action as far
+// as durability goes: fim.scan is durable (decision (g) option 2), every other
+// action is attached and not durable. A durable action other than fim.scan is
+// refused whatever its parameters. The grant allowlist (permit) also rejects
+// them, so this is the runner's own check, not the only one.
+func durableLeaseOK(a actions.Action) bool {
+	return a.Durable == (a.ID == permit.FimScanActionID)
 }
 
 // leaseActionParams returns the canonical parameters an action of an ordinary
@@ -334,6 +342,9 @@ func (s *Service) RunDueReadGrants(ctx context.Context) {
 	if !ok {
 		return
 	}
+	if err := s.collectLeaseJobs(ctx); err != nil {
+		s.log.Error("read lease jobs", "error", err.Error())
+	}
 	cctx, cancel := context.WithTimeout(ctx, callTimeout)
 	r, err := exec.ListReadGrants(cctx, &pb.ListReadGrantsRequest{})
 	cancel()
@@ -369,6 +380,20 @@ func (s *Service) runLease(ctx context.Context, exec readGrantRunner, l ordinary
 		s.log.Error("read lease runs", "grant", l.id, "error", err.Error())
 		return nil
 	}
+	// fim.scan's floor is per host and mode across every lease and execution,
+	// so its newest run per host is read for all of them, not for this lease.
+	fimLast := map[string]map[string]time.Time{}
+	for _, la := range l.actions {
+		if la.action.ID != permit.FimScanActionID {
+			continue
+		}
+		m, err := s.fimScanLastRuns(ctx, la.params)
+		if err != nil {
+			s.log.Error("read lease runs", "grant", l.id, "error", err.Error())
+			return nil
+		}
+		fimLast[la.hash] = m
+	}
 	for _, t := range l.targets {
 		pin, ok := pinOf[t.HostID]
 		ref := l.credRef[t.HostID]
@@ -402,7 +427,11 @@ func (s *Service) runLease(ctx context.Context, exec readGrantRunner, l ordinary
 				// interval; asking sooner only gets a refusal that stops the
 				// host's other actions for this tick.
 				due := max(l.interval, leaseActionFloor(la))
-				if at, ok := last[a.ID+"\x00"+t.HostID]; ok && s.now().Before(at.Add(due)) {
+				at, seen := last[a.ID+"\x00"+t.HostID]
+				if hostAt, ok := fimLast[la.hash][t.HostID]; a.ID == permit.FimScanActionID && ok && (!seen || hostAt.After(at)) {
+					at, seen = hostAt, true
+				}
+				if seen && s.now().Before(at.Add(due)) {
 					continue
 				}
 			}
@@ -485,6 +514,13 @@ func (s *Service) runLeaseAction(ctx context.Context, exec readGrantRunner, l or
 	code := status.Code(err)
 	switch {
 	case code == codes.OK:
+		if a.ID == permit.FimScanActionID {
+			// The executor answers once the durable job is started, not when
+			// it ends: the run is stored as running until collectLeaseJobs
+			// reads its outcome.
+			s.storeLeaseJob(ctx, l.id, a, t, ref, la.params, r.GetExecutionId())
+			return false, nil
+		}
 		s.storeLeaseRun(ctx, l.id, a, t, ref, la.params, r.GetExecutionId(), r.GetResult())
 		return r.GetResult().GetClass() == "success", nil
 	case code == codes.ResourceExhausted:
@@ -528,4 +564,111 @@ func (s *Service) storeLeaseRun(ctx context.Context, grantID string, a actions.A
 		return
 	}
 	s.finishHost(id, a.ID, t.HostID, res.GetClass(), res.GetDetail(), int(res.GetExitCode()), res.GetResult(), res.GetLog(), res.GetLogTruncated())
+}
+
+// storeLeaseJob records a durable fim.scan read of a lease that the executor
+// started. Its host is running and has no class until collectLeaseJobs stores
+// the job's outcome. The execution keeps state 'finished' with no finish time
+// until then: Resume restarts every execution in state 'running' through the
+// execution dispatcher, which must never see a lease run.
+func (s *Service) storeLeaseJob(ctx context.Context, grantID string, a actions.Action, t canonical.Target, ref string, params []byte, id string) {
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO executions (id, digest, action_id, module_version, artifact_sha256, risk, requirement, state,
+			durable, timeout_s, created_by, created_at, params, schedule_id) VALUES (?, '', ?, ?, ?, 'LOW', ?, 'finished', 1, ?, ?, ?, ?, ?)`,
+		id, a.ID, a.Version, a.SHA256(), leaseRunRequirement, int64(a.Timeout/time.Second), "schedule", s.now().Unix(), string(params), grantID); err != nil {
+		s.log.Error("store read lease job", "grant", grantID, "error", err.Error())
+		return
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO execution_hosts (execution_id, host_id, fingerprint, credential_ref, endpoints, state, started_at)
+		VALUES (?, ?, ?, ?, '[]', 'running', ?)`, id, t.HostID, t.HostKeyFingerprint, ref, s.now().Unix()); err != nil {
+		s.log.Error("store read lease job", "grant", grantID, "error", err.Error())
+		return
+	}
+	s.log.Info("audit", "kind", "read_lease_job_started", "grant", grantID, "execution", id, "host", t.HostID)
+}
+
+// leaseJobsPerTick bounds the durable lease jobs one tick collects.
+const leaseJobsPerTick = 64
+
+// collectLeaseJobs reads the outcome of the lease jobs stored as running. A
+// job that has ended is stored with its class, exit code, result and log, and
+// its result is released on the executor afterwards. A job the executor has
+// no record of ends as unknown and is never run again. A job still running,
+// or one whose read fails, stays running for the next tick.
+func (s *Service) collectLeaseJobs(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT h.execution_id, h.host_id, e.action_id FROM execution_hosts h
+			JOIN executions e ON e.id = h.execution_id
+			WHERE h.state = 'running' AND e.durable = 1 AND e.schedule_id IS NOT NULL
+			ORDER BY e.created_at, h.execution_id LIMIT ?`, leaseJobsPerTick)
+	if err != nil {
+		return fmt.Errorf("list read lease jobs: %w", err)
+	}
+	type job struct{ id, host, action string }
+	var jobs []job
+	for rows.Next() {
+		var j job
+		if err := rows.Scan(&j.id, &j.host, &j.action); err != nil {
+			rows.Close()
+			return fmt.Errorf("list read lease jobs: %w", err)
+		}
+		jobs = append(jobs, j)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("list read lease jobs: %w", err)
+	}
+	for _, j := range jobs {
+		cctx, cancel := context.WithTimeout(ctx, callTimeout)
+		r, err := s.exec.GetRun(cctx, &pb.GetRunRequest{ExecutionId: j.id, HostId: j.host})
+		cancel()
+		switch {
+		case status.Code(err) == codes.NotFound:
+			s.finishHost(j.id, j.action, j.host, "unknown", "the executor has no record of this run", -1, nil, nil, false)
+			s.finishLeaseExecution(ctx, j.id)
+			continue
+		case err != nil:
+			s.log.Warn("read lease job", "execution", j.id, "host", j.host, "error", refusal(err))
+			continue
+		case r.GetRun().GetState() != "finished":
+			continue
+		}
+		st := r.GetRun()
+		s.finishHost(j.id, j.action, j.host, st.GetClass(), st.GetDetail(), int(st.GetExitCode()), st.GetResult(), st.GetLog(), st.GetLogTruncated())
+		s.finishLeaseExecution(ctx, j.id)
+		cctx, cancel = context.WithTimeout(ctx, callTimeout)
+		if _, err := s.exec.GetRun(cctx, &pb.GetRunRequest{ExecutionId: j.id, HostId: j.host, Release: true}); err != nil {
+			s.log.Warn("release read lease job", "execution", j.id, "host", j.host, "error", refusal(err))
+		}
+		cancel()
+	}
+	return nil
+}
+
+// finishLeaseExecution sets the finish time of a lease execution once its job
+// has been collected.
+func (s *Service) finishLeaseExecution(ctx context.Context, id string) {
+	if _, err := s.db.ExecContext(ctx, `UPDATE executions SET finished_at = ? WHERE id = ? AND finished_at IS NULL`, s.now().Unix(), id); err != nil {
+		s.log.Error("finish read lease job", "execution", id, "error", err.Error())
+	}
+}
+
+// fimScanLastRuns returns, per host, the newest stored run of fim.scan with the
+// canonical parameters params, whichever lease or execution stored it.
+func (s *Service) fimScanLastRuns(ctx context.Context, params []byte) (map[string]time.Time, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT h.host_id, max(e.created_at)
+		FROM executions e JOIN execution_hosts h ON h.execution_id = e.id
+		WHERE e.action_id = ? AND e.params = ? GROUP BY h.host_id`, permit.FimScanActionID, string(params))
+	if err != nil {
+		return nil, fmt.Errorf("list fim.scan runs: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]time.Time{}
+	for rows.Next() {
+		var host string
+		var at int64
+		if err := rows.Scan(&host, &at); err != nil {
+			return nil, fmt.Errorf("list fim.scan runs: %w", err)
+		}
+		out[host] = time.Unix(at, 0)
+	}
+	return out, rows.Err()
 }
