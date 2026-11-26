@@ -42,6 +42,11 @@ const (
 	netdevImportInterval = 30 * time.Second
 )
 
+// netdevSpoolRoot is the spool directory startNetDevImport imports. It is
+// netdevSpoolDir in production. Tests replace it with a temporary directory
+// before runServer starts; nothing else changes it.
+var netdevSpoolRoot = netdevSpoolDir
+
 // netdevImport runs the spool importer until its context ends.
 type netdevImport struct {
 	root     string
@@ -146,7 +151,7 @@ func startNetDevImport(d serverDeps) error {
 	if d.db == nil || d.run == nil {
 		return nil
 	}
-	n := newNetDevImport(d.db, netdevSpoolDir, d.log, time.Now)
+	n := newNetDevImport(d.db, netdevSpoolRoot, d.log, time.Now)
 	if err := d.run(func(ctx context.Context) { n.run(ctx) }); err != nil {
 		return fmt.Errorf("netdev import: %w", err)
 	}
