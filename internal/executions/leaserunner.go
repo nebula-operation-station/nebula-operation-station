@@ -595,12 +595,14 @@ const leaseJobsPerTick = 64
 // job that has ended is stored with its class, exit code, result and log, and
 // its result is released on the executor afterwards. A job the executor has
 // no record of ends as unknown and is never run again. A job still running,
-// or one whose read fails, stays running for the next tick.
+// or one whose read fails, stays running for the next tick. Only lease rows
+// are selected: schedule_id is '' (NOT NULL DEFAULT '') for every other
+// execution, so a user's durable run in flight is never read here.
 func (s *Service) collectLeaseJobs(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, `SELECT h.execution_id, h.host_id, e.action_id FROM execution_hosts h
 			JOIN executions e ON e.id = h.execution_id
-			WHERE h.state = 'running' AND e.durable = 1 AND e.schedule_id IS NOT NULL
-			ORDER BY e.created_at, h.execution_id LIMIT ?`, leaseJobsPerTick)
+			WHERE h.state = 'running' AND e.durable = 1 AND e.schedule_id != '' AND e.requirement = ?
+			ORDER BY e.created_at, h.execution_id LIMIT ?`, leaseRunRequirement, leaseJobsPerTick)
 	if err != nil {
 		return fmt.Errorf("list read lease jobs: %w", err)
 	}

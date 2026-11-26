@@ -402,6 +402,81 @@ func TestOnlyFimScanIsDurableInALease(t *testing.T) {
 	if durableOther == 0 {
 		t.Fatal("the catalog has no durable action besides fim.scan; the check ran on nothing")
 	}
+	// The rule is durable == (ID == fim.scan), so fim.scan without the durable
+	// flag is refused too: a rule that drops the flag would accept it.
+	fs, ok := actions.Lookup(permit.FimScanActionID)
+	if !ok {
+		t.Fatal("fim.scan is not in the catalog")
+	}
+	fs.Durable = false
+	if durableLeaseOK(fs) {
+		t.Error("fim.scan without the durable flag is accepted by the lease runner")
+	}
+}
+
+// manualGetRunFake is a jobFake that reports the run manual, a durable run a
+// user started on the host, as unknown: NotFound on any read of it, release
+// included. Every such read is recorded in touched.
+type manualGetRunFake struct {
+	*jobFake
+	manual  string
+	touched []string
+}
+
+func (f *manualGetRunFake) GetRun(ctx context.Context, in *pb.GetRunRequest, opts ...grpc.CallOption) (*pb.GetRunResponse, error) {
+	if in.GetExecutionId() == f.manual {
+		f.touched = append(f.touched, in.GetExecutionId())
+		return nil, status.Error(codes.NotFound, "no record of this run")
+	}
+	return f.jobFake.GetRun(ctx, in, opts...)
+}
+
+// TestManualDurableRunIsNotCollectedAsALeaseJob checks that collectLeaseJobs
+// reads only the durable jobs of leases. A user's durable fim.scan run in
+// flight on the same host, with no schedule, is never read, marked unknown or
+// finished, or released, while the lease's own job is still collected.
+func TestManualDurableRunIsNotCollectedAsALeaseJob(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	s, f := setupLeases(t, &now, func(n time.Time) *pb.ReadGrant {
+		return leaseEntry(t, fimLeaseDoc(t, n, []string{"web"}, "full"), n)
+	})
+	const manualID = "00000000-0000-4000-8000-0000000000c1"
+	mf := &manualGetRunFake{jobFake: &jobFake{leaseRunFake: f}, manual: manualID}
+	s.exec = mf
+	ctx := context.Background()
+
+	s.RunDueReadGrants(ctx)
+	if len(f.runs) != 1 {
+		t.Fatalf("%d runs, want 1 fim.scan run of the lease", len(f.runs))
+	}
+	insertManualFimScan(t, s, manualID, "incremental", "running", "running", "", now)
+
+	mf.final = &pb.RunStatus{State: "finished", Class: "success", Result: []byte(`{"ok":true}`)}
+	now = now.Add(time.Hour)
+	s.RunDueReadGrants(ctx)
+
+	if len(mf.touched) != 0 {
+		t.Fatalf("the manual durable run was read %d times as a lease job, want 0", len(mf.touched))
+	}
+	var hostState, class, execState string
+	var finished sql.NullInt64
+	if err := s.db.QueryRow(`SELECT h.state, h.class, e.state, e.finished_at FROM execution_hosts h
+		JOIN executions e ON e.id = h.execution_id WHERE e.id = ?`, manualID).Scan(&hostState, &class, &execState, &finished); err != nil {
+		t.Fatal(err)
+	}
+	if hostState != "running" || class != "" || execState != "running" || finished.Valid {
+		t.Fatalf("manual run: host %q class %q state %q finished %v; want untouched and running",
+			hostState, class, execState, finished)
+	}
+	var leaseState string
+	if err := s.db.QueryRow(`SELECT h.state FROM execution_hosts h
+		JOIN executions e ON e.id = h.execution_id WHERE e.action_id = ? AND e.schedule_id = ?`,
+		permit.FimScanActionID, testGrantID).Scan(&leaseState); err != nil {
+		t.Fatal(err)
+	}
+	if leaseState != "finished" || !mf.released {
+		t.Fatalf("lease job host %q released %v; want the lease job collected and released", leaseState, mf.released)
+	}
 }
 
 // insertManualFimScan stores a fim.scan execution of mode that no lease
