@@ -94,14 +94,20 @@ const (
 	ReasonUnknownDevice          = "unknown_device"
 	ReasonWrongFamily            = "wrong_family"
 	ReasonTrustGenerationChanged = "trust_generation_changed"
-	ReasonObservationTooOld      = "observation_too_old"
-	ReasonFutureObservation      = "future_observation"
-	ReasonReplayed               = "replayed_record"
-	ReasonSuperseded             = "superseded_record"
+	// ReasonTrustGenerationRegressed: the record carries a trust generation
+	// below the device's stored one, so the store refuses it. The record is
+	// kept at once; a lower generation never becomes valid by waiting.
+	ReasonTrustGenerationRegressed = "trust_generation_regressed"
+	ReasonObservationTooOld        = "observation_too_old"
+	ReasonFutureObservation        = "future_observation"
+	ReasonReplayed                 = "replayed_record"
+	ReasonSuperseded               = "superseded_record"
 	// ReasonDeviceBlocked: the collector reports the device as blocked. Its
 	// metadata record is written (the row is marked blocked, with its
 	// reason), and every dataset of the device is kept with this reason
-	// while the device stays halted (see Importer.blocked). Before the row
+	// while the device stays halted (see Importer.blocked). Datasets that
+	// arrive while a newer unblocked metadata record of the device waits are
+	// deferred instead, so they are not kept with this reason. Before the row
 	// had a block field, the metadata record itself was kept with it.
 	ReasonDeviceBlocked = "device_blocked"
 )
@@ -345,12 +351,20 @@ func (im *Importer) Run(ctx context.Context) (ImportReport, error) {
 			im.reject(ctx, name, reason, &rep)
 			continue
 		}
+		// A device whose metadata waits (see writeMetadata) keeps its datasets
+		// waiting, even while it is blocked: its newer unblocked record may
+		// still lift the block, and rejecting the datasets now would lose
+		// them for good. Only a blocked device with nothing pending keeps them.
+		_, stop := halted[n.device]
+		if stop || now.Before(im.backoff[n.device].notBefore) {
+			rep.Deferred++
+			continue
+		}
 		if _, ok := im.blocked[n.device]; ok {
 			im.reject(ctx, name, ReasonDeviceBlocked, &rep)
 			continue
 		}
-		_, stop := halted[n.device]
-		if stop || now.Before(im.backoff[n.device].notBefore) || taken >= MaxRecordsPerRun {
+		if taken >= MaxRecordsPerRun {
 			rep.Deferred++
 			continue
 		}
@@ -830,6 +844,8 @@ func storeRejection(err error) (string, bool) {
 		return ReasonWrongFamily, true
 	case errors.Is(err, netdevinventory.ErrTrustGenerationChanged):
 		return ReasonTrustGenerationChanged, true
+	case errors.Is(err, netdevinventory.ErrTrustGenerationRegressed):
+		return ReasonTrustGenerationRegressed, true
 	case errors.Is(err, netdevinventory.ErrObservationTooOld):
 		return ReasonObservationTooOld, true
 	case errors.Is(err, netdevinventory.ErrFutureObservation):

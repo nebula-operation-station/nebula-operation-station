@@ -157,8 +157,9 @@ also a minimum); "Freigabe per Security-Key" is the ADR 0007 approval (one
 fresh user-verified assertion over the grant digest, Hardened mode via CLI).
 
 **Follow-up (Claude), not covered by the quote** (previously listed as
-decided): storing image reads (wiring `ObserveImage`) and exporting stored
-image inventories in `vuln-inventory-v1`.
+decided): storing image reads (wiring `ObserveImage`; wired since img01–img09,
+see the state note below) and exporting stored image inventories in
+`vuln-inventory-v1`.
 
 **Unchanged (Claude):** the read-only allowlist, LOW on every selected host
 (`permit.lowEverywhere`), no vault secrets in read runs, and E4 (3
@@ -180,8 +181,11 @@ State of the code on main (Claude; this paper changes no code):
 `internal/permit/lease.go:99–103` already admits the entry with a parameters
 hash; `leaseableAction` (`internal/executions/readgrants_propose.go:173`) and
 the lease runner (`internal/executions/leaserunner.go:93`) still reject
-actions with parameters; `ObserveImage` in `cmd/nebula-server/vuln_images.go`
-is marked "NOT WIRED" and `imageSubjects` has no caller outside its tests.
+actions with parameters. `ObserveImage` in `cmd/nebula-server/vuln_images.go`
+is wired (checked 2026-11-26): `cmd/nebula-server/main.go` passes
+`newVulnImageService` to `ops.SetImageObserver`, and `imageSubjects` is called
+from `cmd/nebula-server/vuln_inventory.go` (previously: "`ObserveImage` ... is
+marked "NOT WIRED" and `imageSubjects` has no caller outside its tests").
 
 ### Still open after the decision (questions for the maintainer)
 
