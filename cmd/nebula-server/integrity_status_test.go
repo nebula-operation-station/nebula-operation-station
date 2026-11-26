@@ -374,7 +374,7 @@ func TestExecutorWithoutOpenFindingsIsClean(t *testing.T) {
 	m := releaseMonitorRun(t)
 	l := integrityLazy(t, &integrityFake{resp: &pb.GetIntegrityStatusResponse{
 		Configured: true,
-		LastRun:    &pb.IntegrityRun{Complete: true, Files: 10},
+		LastRun:    &pb.IntegrityRun{Complete: true, State: "clean", Files: 10},
 	}})
 	srv := integrityHTML(t, m, lazyIntegrityStatus(l))
 
@@ -481,6 +481,57 @@ func TestExecutorReadFailureIsLogged(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "/secret/path") || strings.Contains(buf.String(), "boom") {
 		t.Errorf("error text logged: %q", buf.String())
+	}
+}
+
+// TestExecutorVerdictNeedsCleanState: "sauber" only for a complete last run
+// whose state is "clean" with every deviation counter at zero. Any other
+// run is shown with its own verdict, and an unknown state is never clean.
+func TestExecutorVerdictNeedsCleanState(t *testing.T) {
+	at := time.Date(2026, 11, 26, 9, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		resp *pb.GetIntegrityStatusResponse
+		want string
+	}{
+		{"clean state, all counters zero", &pb.GetIntegrityStatusResponse{
+			LastRun: &pb.IntegrityRun{Complete: true, State: "clean"}}, verdictClean},
+		{"deviations state, counted differences, no finding", &pb.GetIntegrityStatusResponse{
+			LastRun: &pb.IntegrityRun{Complete: true, State: "deviations", Different: 2}}, verdictDeviations},
+		{"clean state but a different file", &pb.GetIntegrityStatusResponse{
+			LastRun: &pb.IntegrityRun{Complete: true, State: "clean", Different: 1}}, verdictDeviations},
+		{"clean state but a missing file", &pb.GetIntegrityStatusResponse{
+			LastRun: &pb.IntegrityRun{Complete: true, State: "clean", Missing: 1}}, verdictDeviations},
+		{"clean state but an extra file", &pb.GetIntegrityStatusResponse{
+			LastRun: &pb.IntegrityRun{Complete: true, State: "clean", Extra: 1}}, verdictDeviations},
+		{"clean state but an unreadable file", &pb.GetIntegrityStatusResponse{
+			LastRun: &pb.IntegrityRun{Complete: true, State: "clean", Unreadable: 1}}, verdictDeviations},
+		{"clean state but a locking deviation", &pb.GetIntegrityStatusResponse{
+			LastRun: &pb.IntegrityRun{Complete: true, State: "clean", Locking: 1}}, verdictDeviations},
+		{"clean state but omitted deviations", &pb.GetIntegrityStatusResponse{
+			LastRun: &pb.IntegrityRun{Complete: true, State: "clean", DeviationsOmitted: 1}}, verdictDeviations},
+		{"clean state but a deviation listed", &pb.GetIntegrityStatusResponse{
+			LastRun: &pb.IntegrityRun{Complete: true, State: "clean",
+				Deviations: []*pb.IntegrityDeviation{{}}}}, verdictDeviations},
+		{"unknown state, all counters zero", &pb.GetIntegrityStatusResponse{
+			LastRun: &pb.IntegrityRun{Complete: true, State: "bogus"}}, verdictUnconfirmed},
+		{"empty state, all counters zero", &pb.GetIntegrityStatusResponse{
+			LastRun: &pb.IntegrityRun{Complete: true}}, verdictUnconfirmed},
+		{"clean state but incomplete", &pb.GetIntegrityStatusResponse{
+			LastRun: &pb.IntegrityRun{Complete: false, State: "clean", Incomplete: "x"}}, verdictUnconfirmed},
+		{"open lock wins", &pb.GetIntegrityStatusResponse{Locked: true,
+			LastRun: &pb.IntegrityRun{Complete: true, State: "clean"}}, verdictOpen},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := executorViewOf(tc.resp, at)
+			if got.Verdict != tc.want {
+				t.Fatalf("verdict %q, want %q", got.Verdict, tc.want)
+			}
+			if got.Verdict == verdictClean && (got.LastRun == nil || got.LastRun.State != "clean") {
+				t.Fatalf("clean verdict without a clean run state: %+v", got.LastRun)
+			}
+		})
 	}
 }
 

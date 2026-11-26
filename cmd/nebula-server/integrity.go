@@ -147,6 +147,10 @@ const (
 	verdictClean = "sauber"
 	// verdictOpen: an I1 or I2 finding is open, or the lock is closed.
 	verdictOpen = "offene Befunde"
+	// verdictDeviations: the last complete run reports differences (state
+	// deviations or any deviation counter above zero) and no finding is
+	// open; the run's counts are shown beside it.
+	verdictDeviations = "Abweichungen"
 	// verdictUnconfirmed: no complete run is known, so nothing is confirmed.
 	verdictUnconfirmed = "nicht bestätigt"
 )
@@ -200,8 +204,10 @@ type integrityStatusJSON struct {
 // value came from the executor and is clipped (integrityTextLimit).
 // Available is false when the executor could not be asked; the other
 // fields are then empty and Checked is the time of the failed attempt.
-// Verdict is verdictClean only for a complete last run with no open I1 or
-// I2 finding and an open lock; anything else is not clean.
+// Verdict is verdictClean only for a complete last run whose state is
+// "clean" with every deviation counter at zero, with no open I1 or I2
+// finding and with the lock not closed (Locked false); anything else is
+// not clean.
 type executorView struct {
 	Source          string        `json:"source"`
 	Available       bool          `json:"available"`
@@ -410,12 +416,30 @@ func executorViewOf(r *pb.GetIntegrityStatusResponse, checked time.Time) executo
 	switch {
 	case r.GetLocked() || len(findings) > 0 || len(tamper) > 0:
 		v.Verdict = verdictOpen
-	case lr != nil && lr.GetComplete():
-		v.Verdict = verdictClean
-	default:
+	case lr == nil || !lr.GetComplete():
 		v.Verdict = verdictUnconfirmed
+	default:
+		v.Verdict = runVerdict(lr)
 	}
 	return v
+}
+
+// runVerdict is the verdict of a complete last run with no open finding.
+// Clean only when the executor states "clean" and every deviation counter
+// is zero; a run with differences shows "Abweichungen"; an unknown state
+// is never clean and stays unconfirmed.
+func runVerdict(lr *pb.IntegrityRun) string {
+	differences := lr.GetDifferent() != 0 || lr.GetMissing() != 0 || lr.GetExtra() != 0 ||
+		lr.GetUnreadable() != 0 || lr.GetLocking() != 0 || lr.GetDeviationsOmitted() != 0 ||
+		len(lr.GetDeviations()) != 0
+	switch {
+	case lr.GetState() == "clean" && !differences:
+		return verdictClean
+	case lr.GetState() == "deviations" || differences:
+		return verdictDeviations
+	default:
+		return verdictUnconfirmed
+	}
 }
 
 // clipText repairs s to valid UTF-8, replaces control characters by spaces
