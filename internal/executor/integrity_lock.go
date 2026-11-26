@@ -324,6 +324,10 @@ var integrityLockedMethods = map[string]bool{
 	pb.ExecutorService_ReadPVE_FullMethodName:             true,
 	pb.ExecutorService_ReadNetDevice_FullMethodName:       true,
 	pb.ExecutorService_ReadPrivateRegistry_FullMethodName: true,
+	// Local image entries: offen laut ADR 0008 Amendment 2 I1, fail-safe
+	// bis Maintainer-Entscheidung (Wächter 26.11.).
+	pb.ExecutorService_AddPVELocalImage_FullMethodName:    true,
+	pb.ExecutorService_RemovePVELocalImage_FullMethodName: true,
 
 	// Not locked.
 	pb.ExecutorService_GetStatus_FullMethodName:                       false,
@@ -428,8 +432,6 @@ var integrityLockedMethods = map[string]bool{
 	pb.ExecutorService_ProposePVEGuestSnapshot_FullMethodName:         false,
 	pb.ExecutorService_ProposePVEGuestProvision_FullMethodName:        false,
 	pb.ExecutorService_ProposePVEImagePrepare_FullMethodName:          false,
-	pb.ExecutorService_AddPVELocalImage_FullMethodName:                false,
-	pb.ExecutorService_RemovePVELocalImage_FullMethodName:             false,
 	pb.ExecutorService_ListPVERemotes_FullMethodName:                  false,
 	pb.ExecutorService_AddPrivateRegistry_FullMethodName:              false,
 	pb.ExecutorService_RotatePrivateRegistryCredential_FullMethodName: false,

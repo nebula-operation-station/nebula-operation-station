@@ -422,9 +422,11 @@ func TestMethodRolesGuestSnapshotThroughInterceptor(t *testing.T) {
 // ADR 0008 amendment 2, D1 (a), D3 (a), D4 (a)): server and admin may
 // propose and commit a preparation and list the images; only the admin may
 // add or remove a local entry; the pve-collector may call none of them.
-// Every method has a role and an integrity-lock entry: the read, the
-// proposal and the local-entry bookkeeping stay open, the commit (which
-// dispatches the preparation) is locked like the provisioning commit.
+// Every method has a role and an integrity-lock entry: the read and the
+// proposal stay open, the commit (which dispatches the preparation) is
+// locked like the provisioning commit, and the local-entry add and remove
+// are locked fail-safe because ADR 0008 amendment 2 (I1) leaves them open
+// for the maintainer.
 func TestMethodRolesPVEImageSurface(t *testing.T) {
 	const (
 		serverUID uint32 = 50001
@@ -447,8 +449,11 @@ func TestMethodRolesPVEImageSurface(t *testing.T) {
 		{propose, []peercred.Role{peercred.RoleServer, peercred.RoleAdmin}, false},
 		{commit, []peercred.Role{peercred.RoleServer, peercred.RoleAdmin}, true},
 		{list, []peercred.Role{peercred.RoleServer, peercred.RoleAdmin}, false},
-		{add, []peercred.Role{peercred.RoleAdmin}, false},
-		{remove, []peercred.Role{peercred.RoleAdmin}, false},
+		// add and remove are locked fail-safe: ADR 0008 amendment 2 (I1)
+		// leaves their classification open for the maintainer, so they
+		// stay locked until that decision (Wächter 26.11.).
+		{add, []peercred.Role{peercred.RoleAdmin}, true},
+		{remove, []peercred.Role{peercred.RoleAdmin}, true},
 	}
 
 	policy := peercred.NewPolicy(map[uint32][]peercred.Role{
