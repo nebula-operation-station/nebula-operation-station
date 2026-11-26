@@ -99,9 +99,9 @@ const (
 	// kept at once; a lower generation never becomes valid by waiting.
 	ReasonTrustGenerationRegressed = "trust_generation_regressed"
 	ReasonObservationTooOld        = "observation_too_old"
-	ReasonFutureObservation      = "future_observation"
-	ReasonReplayed               = "replayed_record"
-	ReasonSuperseded             = "superseded_record"
+	ReasonFutureObservation        = "future_observation"
+	ReasonReplayed                 = "replayed_record"
+	ReasonSuperseded               = "superseded_record"
 	// ReasonDeviceBlocked: the collector reports the device as blocked. Its
 	// metadata record is written (the row is marked blocked, with its
 	// reason), and every dataset of the device is kept with this reason
