@@ -454,7 +454,13 @@ func TestFimScanCollectAbortedAtLockResumesAfterUnlock(t *testing.T) {
 			t.Errorf("lock: %v", err)
 		}
 	})
+	// Lock closed the collect's connection: neither the log session nor a
+	// remove starts after it returned.
+	cmds := len(f.ssh.commands())
 	f.waitCollectEnded(id)
+	if got := f.ssh.commands(); len(got) != cmds {
+		t.Fatalf("host commands after Lock returned: %q", got[cmds:])
+	}
 	f.requireOpen(id)
 	f.waitLogs("reconcile_collect_paused", id, 1)
 	if n := len(f.logs.find("reconcile_collect_failed", id)); n != 0 {
@@ -722,5 +728,133 @@ func TestReadPathTimeoutAndDurableLimits(t *testing.T) {
 		if _, err := e.svc.RunReadGrant(context.Background(), req); status.Code(err) == codes.InvalidArgument {
 			t.Fatalf("%s at %s refused as invalid: %v", tc.action, tc.timeout, err)
 		}
+	}
+}
+
+// lockPoint is a Lock that lands at one host operation of the reconciler,
+// after its lock check passed and before the operation starts (the
+// check-then-act window of review fi04f2, MEDIUM 1/2).
+type lockPoint struct {
+	mu   sync.Mutex
+	done bool
+	// cmds is how many commands the host had seen when Lock returned.
+	cmds int
+}
+
+// lockAt arranges for Lock to be called at the reconciler's next host
+// operation op of the execution id (any execution if id is "").
+func (f *fimLeaseEnv) lockAt(op, id string) *lockPoint {
+	lp := &lockPoint{cmds: -1}
+	f.svc.reconcileConns.beforeHostOp = func(o, exec string) {
+		if o != op || (id != "" && exec != id) {
+			return
+		}
+		lp.mu.Lock()
+		defer lp.mu.Unlock()
+		if lp.done {
+			return
+		}
+		lp.done = true
+		if _, err := f.svc.Lock(context.Background(), &pb.LockRequest{}); err != nil {
+			f.t.Errorf("lock: %v", err)
+		}
+		lp.cmds = len(f.ssh.commands())
+	}
+	return lp
+}
+
+// requireNoCommandAfter checks that Lock was reached and that the host saw
+// no command after Lock returned.
+func (lp *lockPoint) requireNoCommandAfter(t *testing.T, srv *testSSH) {
+	t.Helper()
+	lp.mu.Lock()
+	defer lp.mu.Unlock()
+	if !lp.done {
+		t.Fatal("the reconciler never reached the lock point")
+	}
+	if cmds := srv.commands(); len(cmds) != lp.cmds {
+		t.Fatalf("host commands after Lock returned: %q", cmds[lp.cmds:])
+	}
+}
+
+// TestReconcileLockAtHostOpStartsNoHostCommand: a Lock that lands after the
+// reconciler's lock check and before its host operation (check, remove, or
+// the fim.scan collect) stops that operation: no host command starts after
+// Lock has returned, the failure is not counted, and the run is handled
+// normally after unlock.
+func TestReconcileLockAtHostOpStartsNoHostCommand(t *testing.T) {
+	for _, op := range []string{"check", "remove", "collect"} {
+		t.Run(op, func(t *testing.T) {
+			f := newFimLeaseEnv(t, true)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			var id string
+			if op == "collect" {
+				id = f.finishedScan(ctx)
+			} else {
+				// No job on the host: the check finds it missing, closes the
+				// run and removes what is left.
+				id = f.createRun(f.ssh.addr, time.Hour)
+			}
+			lp := f.lockAt(op, id)
+			within(t, "ReconcileOnce", func() { f.svc.ReconcileOnce(ctx) })
+			f.waitCollectEnded(id)
+			lp.requireNoCommandAfter(t, f.ssh)
+			if n := f.failAttempts(id); n != 0 {
+				t.Fatalf("a Lock counted as %d failed reconcile attempts", n)
+			}
+			for _, kind := range []string{"reconcile_check_failed", "reconcile_collect_failed", "job_cleanup_failed"} {
+				if n := len(f.logs.find(kind, id)); n != 0 {
+					t.Fatalf("a Lock audited as %s (%d)", kind, n)
+				}
+			}
+			if op == "remove" {
+				// The run was closed before the remove; the host is not
+				// touched again.
+				f.requireFinished(id, classNotExecuted)
+			} else {
+				f.requireOpen(id)
+			}
+
+			if _, err := f.svc.keys.Unlock([]byte(testPassphrase)); err != nil {
+				t.Fatal(err)
+			}
+			if op == "collect" {
+				f.requireScanCollected(ctx, f.reconcileUntilFinished(id))
+				return
+			}
+			f.svc.ReconcileOnce(ctx)
+			f.requireFinished(id, classNotExecuted)
+		})
+	}
+}
+
+// TestReconcilePassStopsAtLock: a Lock during a pass over several runs stops
+// the pass: the run in progress starts no host command after Lock returned
+// and no further run is connected to.
+func TestReconcilePassStopsAtLock(t *testing.T) {
+	f := newFimLeaseEnv(t, true)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	ids := []string{f.createRun(f.ssh.addr, time.Hour), f.createRun(f.ssh.addr, time.Hour), f.createRun(f.ssh.addr, time.Hour)}
+	lp := f.lockAt("check", "")
+	before := f.ssh.connections()
+	within(t, "ReconcileOnce", func() { f.svc.ReconcileOnce(ctx) })
+	lp.requireNoCommandAfter(t, f.ssh)
+	if n := f.ssh.connections() - before; n != 1 {
+		t.Fatalf("the pass opened %d host connections, want 1 (it stops at Lock)", n)
+	}
+	for _, id := range ids {
+		f.requireOpen(id)
+		if n := f.failAttempts(id); n != 0 {
+			t.Fatalf("run %s: a Lock counted as %d failed attempts", id, n)
+		}
+	}
+	if _, err := f.svc.keys.Unlock([]byte(testPassphrase)); err != nil {
+		t.Fatal(err)
+	}
+	f.svc.ReconcileOnce(ctx)
+	for _, id := range ids {
+		f.requireFinished(id, classNotExecuted)
 	}
 }
