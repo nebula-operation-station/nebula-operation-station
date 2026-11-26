@@ -231,6 +231,10 @@ type opsSources struct {
 	// Traffic reads the stored net.facts results of the hosts (the listener
 	// source). Required.
 	Traffic trafficingest.Source
+	// Tier is the host criticality of the finding scores: the tierer the
+	// vulnerability pages use (newVulnServiceWithTier). Nil: every subject
+	// is unset.
+	Tier *vulnTierer
 	// Now is the clock of the listener freshness rule; nil means time.Now.
 	Now func() time.Time
 }
@@ -264,7 +268,7 @@ func newOpsFindings(srcs opsSources) (opsVulnFindings, error) {
 		}
 		return vulnfix.NewResolver(updates, g)
 	}
-	return newOpsVulnFindings(srcs.Findings, inner, newFixes)
+	return newOpsVulnFindingsWith(srcs.Findings, inner, newFixes, srcs.Tier)
 }
 
 // newOpsAPI returns the ops API handler, or nil when no ops token is
