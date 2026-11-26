@@ -564,6 +564,12 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	if err != nil {
 		return err
 	}
+	// Maintainer decisions on findings (ADR 0011 Q4, variant A): the same
+	// login assertion as the agent settings, bound to the decision digest.
+	vulnDecide, err := newVulnDecider(vuln, audit, isAdmin, exec, nil, log)
+	if err != nil {
+		return err
+	}
 	// Ops agent settings (ADR 0016 D12): the same maintainer and fresh
 	// assertion rules; the settings_changed event follows each commit.
 	opsAgent, err := newOpsAgentWiring(db, audit, isAdmin, exec, notifier, log)
@@ -650,7 +656,7 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 		SecurityKeys: securityKeys,
 		TOTPStatus:   totpStatus,
 		// Findings pages over the real store.
-		Vuln:      vulnPages{v: vuln, admin: isAdmin},
+		Vuln:      vulnPages{v: vuln, admin: isAdmin, dec: vulnDecide},
 		VulnAgent: vulnAgent,
 		// Ops agent settings section (ADR 0016 D12).
 		OpsAgent: opsAgent,
