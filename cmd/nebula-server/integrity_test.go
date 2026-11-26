@@ -59,7 +59,7 @@ func TestIntegrityServerChecksOnlyExecutorAdmittedReference(t *testing.T) {
 		t.Fatalf("reference source %q", m.ReferenceSource)
 	}
 	mux := http.NewServeMux()
-	mountIntegrityStatus(mux, m)
+	mountIntegrityStatus(mux, m, nil)
 	if got := getIntegrityStatus(t, mux); got.ReferenceSource != integrity.SourceExecutorAdmitted {
 		t.Fatalf("pending status %+v", got)
 	}
@@ -161,7 +161,7 @@ func TestIntegrityServerWithoutListIsIncompleteOrNotCheckable(t *testing.T) {
 			var logBuf bytes.Buffer
 			m := newIntegrityMonitorAt(slog.New(slog.NewJSONHandler(&logBuf, nil)), tc.version, root)
 			mux := http.NewServeMux()
-			mountIntegrityStatus(mux, m)
+			mountIntegrityStatus(mux, m, nil)
 
 			if got := getIntegrityStatus(t, mux); got.State != integrity.StatePending {
 				t.Fatalf("before the start check: %q", got.State)
@@ -199,7 +199,7 @@ func TestIntegrityServerRejectsUnsignedList(t *testing.T) {
 func TestIntegrityStatusOnlyGET(t *testing.T) {
 	m := newIntegrityMonitor(slog.New(slog.DiscardHandler), "dev")
 	mux := http.NewServeMux()
-	mountIntegrityStatus(mux, m)
+	mountIntegrityStatus(mux, m, nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, integrityStatusPath, nil))
 	if rec.Code != http.StatusMethodNotAllowed {
