@@ -1061,3 +1061,30 @@ func TestOpsScoreWithoutCriticalitySourceIsUnset(t *testing.T) {
 		t.Errorf("no inventory: score = %d, want the unset 52", got["web-crit"])
 	}
 }
+
+// TestOpsFindingsWiringScoresWithTheServerTierer: the source the ops API gets
+// from the server (newOpsFindings with opsSources.Tier, the tierer shared with
+// the vulnerability pages) scores a critical host with its criticality, the
+// same as the pages; without Tier every subject is unset.
+func TestOpsFindingsWiringScoresWithTheServerTierer(t *testing.T) {
+	clk := &tierClock{t: time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)}
+	tr := newVulnTierer(&tierLister{hosts: tierHosts()}, clk.Now, nil)
+	fs := []vulnstore.Finding{opsScoreFinding("web-low"), opsScoreFinding("web-crit")}
+	srcs := opsSources{Findings: sliceReader{fs: fs}, LastResults: opsWireLastResults(t, opsWireSim), Tier: tr}
+	src, err := newOpsFindings(srcs)
+	if err != nil {
+		t.Fatalf("newOpsFindings: %v", err)
+	}
+	if got := opsScoresOf(t, src); got["web-low"] != 31 || got["web-crit"] != 62 {
+		t.Errorf("with Tier: scores = %v, want web-low 31 and web-crit 62 (as the pages)", got)
+	}
+
+	srcs.Tier = nil
+	src, err = newOpsFindings(srcs)
+	if err != nil {
+		t.Fatalf("newOpsFindings without Tier: %v", err)
+	}
+	if got := opsScoresOf(t, src); got["web-low"] != 52 || got["web-crit"] != 52 {
+		t.Errorf("without Tier: scores = %v, want the unset 52 for both", got)
+	}
+}
