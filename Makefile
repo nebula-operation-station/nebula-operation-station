@@ -5,6 +5,12 @@ GOBIN         ?= $(shell $(GO) env GOPATH)/bin
 # staticcheck 2026.2.1 cannot read Go 1.27 export data yet.
 LINT_TOOLCHAIN ?= go1.26.9
 STATICCHECK_VERSION ?= v0.8.1
+# cmd/nebula-server is the largest test binary. Under load it ran past the
+# shared 40m per-binary timeout of `make test` although it passes alone
+# (Wächter, 2026-11-26), so it runs in its own go test call with this timeout.
+# Override without editing: make test SERVER_TEST_TIMEOUT=120m
+SERVER_TEST_TIMEOUT ?= 90m
+SERVER_TEST_PKGS    := ./cmd/nebula-server/...
 VERSION       ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT        ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 LDFLAGS       := -s -w \
@@ -21,8 +27,19 @@ build:
 # The vulnstore writer tests run a second time without -race: under the race
 # detector they use 2 contending writers, without it 4 (race_off_test.go), so
 # the 4-writer starvation checks run in CI too (vs02f, review of PR #791).
+#
+# All packages are tested: first every package except SERVER_TEST_PKGS, then
+# SERVER_TEST_PKGS with SERVER_TEST_TIMEOUT (see the variable at the top).
+# The lists are computed only when this target runs (recursive =).
+TEST_ALL_PKGS    = $(shell $(GO) list ./...)
+TEST_SERVER_PKGS = $(shell $(GO) list $(SERVER_TEST_PKGS))
+TEST_OTHER_PKGS  = $(filter-out $(TEST_SERVER_PKGS),$(TEST_ALL_PKGS))
+
 test:
-	$(GO) test -race -timeout 40m ./...
+	$(if $(TEST_SERVER_PKGS),,$(error test: go list $(SERVER_TEST_PKGS) found no packages))
+	$(if $(TEST_OTHER_PKGS),,$(error test: go list ./... found no other packages))
+	$(GO) test -race -timeout 40m $(TEST_OTHER_PKGS)
+	$(GO) test -race -timeout $(SERVER_TEST_TIMEOUT) $(SERVER_TEST_PKGS)
 	$(GO) test -count=1 -timeout 20m -run 'TestCompleteDropsSupersededHolds|TestConcurrentWriter' ./internal/vulnstore/
 
 # Deployment policy tests for the systemd units and nftables files, the
