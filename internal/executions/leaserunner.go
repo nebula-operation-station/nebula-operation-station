@@ -20,6 +20,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/fimscan"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
@@ -44,6 +45,12 @@ const leaseRunRequirement = "read lease"
 // leaseBudgetWindow is the rolling window of a lease's run budget.
 const leaseBudgetWindow = time.Hour
 
+// durableReadCallTimeout bounds the call that starts a durable read (fim.scan).
+// The executor answers once the job is stored and started, within its own
+// 30 s dispatch bound. The job runs on the host after the call and the
+// executor collects it, so the runner does not wait for the job's 40 min.
+const durableReadCallTimeout = 2 * time.Minute
+
 // readGrantRunner is the executor API the lease runner needs. Like
 // readGrantExecutor it is asserted, not part of Executor: an executor
 // without it runs legacy schedules only.
@@ -64,10 +71,13 @@ type ordinaryLease struct {
 }
 
 // leaseAction is one action of an ordinary lease with the parameters it runs
-// with: canonical JSON, "{}" for an action without parameters.
+// with: canonical JSON, "{}" for an action without parameters. hash is the
+// ParametersHash the grant binds the entry to; for fim.scan it names the mode,
+// which sets the entry's own due time (leaseActionFloor).
 type leaseAction struct {
 	action actions.Action
 	params []byte
+	hash   string
 }
 
 // boundParams is one stored parameter row of a read grant (read_grant_params):
@@ -113,14 +123,17 @@ func ordinaryLeases(grants []*pb.ReadGrant, now time.Time, stored map[string][]b
 		}
 		for _, da := range doc.Actions {
 			a, ok := actions.Lookup(da.ActionID)
-			if !ok || a.Version != da.ModuleVersion || a.SHA256() != da.ArtifactSHA256 || !a.ReadOnly || a.Durable {
+			// Durable is allowed for fim.scan alone (decision (g) option 2);
+			// every other durable action stays out.
+			if !ok || a.Version != da.ModuleVersion || a.SHA256() != da.ArtifactSHA256 || !a.ReadOnly ||
+				a.Durable != (a.ID == permit.FimScanActionID) {
 				continue
 			}
 			params, ok := leaseActionParams(a, da, empty, stored[l.id])
 			if !ok || (da.ParametersHash != empty && slices.ContainsFunc(l.actions, func(x leaseAction) bool { return x.action.ID == a.ID })) {
 				continue
 			}
-			l.actions = append(l.actions, leaseAction{action: a, params: params})
+			l.actions = append(l.actions, leaseAction{action: a, params: params, hash: da.ParametersHash})
 		}
 		// The document may list the actions in any order; docker.inspect must
 		// run before image.packages, so that the latter can wait for it.
@@ -146,9 +159,15 @@ func ordinaryLeases(grants []*pb.ReadGrant, now time.Time, stored map[string][]b
 // the document's ParametersHash and passes the action's validation; without
 // such a row, or with any other value, the action is skipped. No other action
 // ever runs with parameters.
+//
+// fim.scan runs with the canonical parameters of the pinned mode whose hash
+// the grant binds (fimScanParams); any other hash is skipped.
 func leaseActionParams(a actions.Action, da permit.ReadGrantAction, empty string, stored []boundParams) ([]byte, bool) {
 	if da.ParametersHash == empty {
 		return []byte(`{}`), len(a.Params) == 0
+	}
+	if a.ID == permit.FimScanActionID {
+		return fimScanParams(da.ParametersHash)
 	}
 	if a.ID != imageLeaseInspectAction && a.ID != imageLeaseImageAction {
 		return nil, false
@@ -168,6 +187,62 @@ func leaseActionParams(a actions.Action, da permit.ReadGrantAction, empty string
 		return canon, true
 	}
 	return nil, false
+}
+
+// fimScanModes are the two modes of fim-default-v1 a fim.scan entry may bind.
+var fimScanModes = []string{"incremental", "full"}
+
+// fimScanModeParams returns the canonical parameters of a fim.scan mode under
+// profile fim-default-v1 and their hash. The hash is checked against the
+// executor's pin (permit.FimScanIncrementalParametersHash or
+// permit.FimScanFullParametersHash), so the bytes always hash to what a grant
+// binds. ok is false for any other mode.
+func fimScanModeParams(mode string) (canon []byte, hash string, ok bool) {
+	var want string
+	switch mode {
+	case "incremental":
+		want = permit.FimScanIncrementalParametersHash
+	case "full":
+		want = permit.FimScanFullParametersHash
+	default:
+		return nil, "", false
+	}
+	raw, err := json.Marshal(map[string]string{"mode": mode, "profile": fimscan.DefaultProfileID})
+	if err != nil {
+		return nil, "", false
+	}
+	canon, hash, err = canonical.CanonicalParameters(raw)
+	if err != nil || hash != want {
+		return nil, "", false
+	}
+	return canon, hash, true
+}
+
+// fimScanParams returns the canonical parameters of the pinned fim.scan mode
+// whose hash is hash. Any other hash, a foreign profile or mode included, has
+// no parameters, so the entry is skipped.
+func fimScanParams(hash string) ([]byte, bool) {
+	for _, mode := range fimScanModes {
+		canon, h, ok := fimScanModeParams(mode)
+		if ok && h == hash {
+			return canon, true
+		}
+	}
+	return nil, false
+}
+
+// leaseActionFloor is the interval after which an entry is due again: the
+// lease interval or the action's floor, whichever is longer. A fim.scan entry
+// has the floor of its own mode (incremental 1 h, full 7 d - 6 h, the
+// executor's floors), so one mode never delays the other.
+func leaseActionFloor(la leaseAction) time.Duration {
+	if la.action.ID != permit.FimScanActionID {
+		return permit.ReadActionMinInterval(la.action.ID)
+	}
+	if la.hash == permit.FimScanFullParametersHash {
+		return permit.FimScanFullMinInterval
+	}
+	return permit.FimScanIncrementalMinInterval
 }
 
 // leaseActionRank orders the actions of one lease: docker.inspect first.
@@ -326,7 +401,7 @@ func (s *Service) runLease(ctx context.Context, exec readGrantRunner, l ordinary
 				// The action's own floor (ADR 0011 D3) can exceed the lease's
 				// interval; asking sooner only gets a refusal that stops the
 				// host's other actions for this tick.
-				due := max(l.interval, permit.ReadActionMinInterval(a.ID))
+				due := max(l.interval, leaseActionFloor(la))
 				if at, ok := last[a.ID+"\x00"+t.HostID]; ok && s.now().Before(at.Add(due)) {
 					continue
 				}
@@ -399,7 +474,11 @@ func (s *Service) runLeaseAction(ctx context.Context, exec readGrantRunner, l or
 	}
 	run := &pb.AuthorizeRunRequest{HostId: t.HostID, HostKeyFingerprint: t.HostKeyFingerprint, ActionId: a.ID, ModuleVersion: a.Version,
 		Artifact: a.Script, ParametersJson: la.params, CredentialRef: ref}
-	rctx, cancel := context.WithTimeout(ctx, a.Timeout+2*time.Minute)
+	callTimeout := a.Timeout + 2*time.Minute
+	if a.ID == permit.FimScanActionID {
+		callTimeout = durableReadCallTimeout
+	}
+	rctx, cancel := context.WithTimeout(ctx, callTimeout)
 	r, err := exec.RunReadGrant(rctx, &pb.RunReadGrantRequest{GrantId: l.id, Trigger: pb.ReadGrantTrigger_READ_GRANT_TRIGGER_SCHEDULED,
 		Run: run, Endpoints: eps, TimeoutSeconds: uint32(a.Timeout / time.Second)})
 	cancel()
@@ -409,6 +488,11 @@ func (s *Service) runLeaseAction(ctx context.Context, exec readGrantRunner, l or
 		s.storeLeaseRun(ctx, l.id, a, t, ref, la.params, r.GetExecutionId(), r.GetResult())
 		return r.GetResult().GetClass() == "success", nil
 	case code == codes.ResourceExhausted:
+		if a.ID == permit.FimScanActionID {
+			// Only this mode's interval has not passed; the host's other
+			// actions go on in this tick.
+			return false, errSkipRun
+		}
 		return false, errSkipTarget // the executor's interval or budget has not passed
 	case code == codes.NotFound,
 		code == codes.PermissionDenied && strings.HasPrefix(status.Convert(err).Message(), string(permit.CodeLeaseInactive)):
