@@ -251,10 +251,6 @@ func (r *netdevE2ERig) approveAsAdmin(t *testing.T, lease executor.NetDevLease) 
 	}
 }
 
-// discardLog is the logger of the chain's parts, whose output the test does not
-// read.
-func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
-
 // runCollectorCycle runs one cycle of the collector's real Poller with the
 // real executor client, spooling into root on the clock now, and waits for
 // the device workers. It returns the cycle report and the debug log of the
