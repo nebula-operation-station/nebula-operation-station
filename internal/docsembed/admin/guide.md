@@ -2927,46 +2927,36 @@ open question made the whole work list fail, and while it was open
 every run ended with `work_unavailable` and no note at all. In this
 build NOS and the agent use the same item shape.
 
-In this build no lab group is produced (see "Status in this build"), so
-a question in class `lab` names no host that NOS can find and carries no
-host facts. It still carries the question and the fleet counts.
+NOS finds a named host only among the hosts with at least one open
+critical or high finding and known listening ports (see "Status in this
+build"), whether or not a fix item for that host is due. A question that
+names any other host carries no facts for it, only the question and the
+fleet counts.
 
 #### What goes to the model
 
-This section has two parts. The first table is the **design** of ADR 0016:
-what the agent would send once its inputs are connected. The second table is
-what **is wired in this build**. Only the second one describes what reaches
-the model today.
-
-**Designed (ADR 0016). Not sent in this build, because no lab group is
-produced and the finding sources are not connected:**
+Nothing is sent while the agent is disabled in the settings, which is the
+default. With the agent enabled, this is what reaches the model in this
+build. Each work item is one prompt.
 
 | Data | `lab` | `external` |
 | --- | --- | --- |
-| Host label, environment, criticality (label at most 64 bytes) | Designed: yes | Designed: no |
-| Exposure level, listening ports (number and protocol, at most 32) | Designed: yes | Designed: no |
-| Per finding (at most 40 per group): vulnerability ID, source package, installed and fixed version, fix state, tier, score, KEV flag | Designed: yes | Designed: no |
-| Counts per tier and KEV, per group and for the fleet | Designed: yes | Designed: fleet counts only |
-| Step candidates as opaque keys (`c1`, `c2`, ...) with a short fixed label that NOS sets; the action ID and the host ID never enter the prompt | Designed: yes | Designed: no |
-| Documentation chunks from the handbook: up to 3 per fix item, found by the finding's package | Designed: yes | Designed: no, `external` items are fleet summaries and carry no chunks |
-
-**Wired in this build.** This is what can reach the model when the settings
-are enabled. The settings have no writer in this build, so in a default
-install nothing is sent at all.
-
-| Data | `lab` | `external` |
-| --- | --- | --- |
-| Fleet counts per tier and KEV (zero in this build), in the summary and in each question | Yes, as zero counts | Yes, as zero counts |
-| The operator instructions (at most 4 KiB) | Yes | Yes |
-| Host labels, ports, per-finding data, step candidates, documentation chunks | **No**: never produced in this build | No |
+| The operator instructions (at most 4 KiB), in every prompt | Yes | Yes |
+| Fleet counts per tier and KEV: the open findings of all inventory hosts, in the daily summary and in each question | Yes | Yes |
+| Fix item, host part: host label (at most 64 bytes), environment, criticality. The host ID is not sent | Yes | No |
+| Fix item, exposure level | Yes, but always `unknown`: no exposure source is wired in this build | No |
+| Fix item, listening ports (number and protocol, at most 32) from the host's newest `net.facts` result | Yes | No |
+| Fix item, per finding (at most 40 per group): vulnerability ID, source package, installed and fixed version, fix state, tier, score, KEV flag | Yes | No |
+| Fix item, counts per tier and KEV of the group | Yes | No |
+| Fix item, step candidates (at most 20): an opaque key (`c1`, `c2`, ...) and the fixed label that NOS sets for the action, such as "Install security updates" or "Reboot the host". The action ID and the host ID are not sent | Yes | No |
+| Fix item, documentation chunks: up to 3, found by the package of the group's first listed finding | Yes | No |
 | Your question in the Ops tab (at most 2 KiB) | Yes | Yes |
-| Facts of the hosts a question names (at most 5) | **No**: no lab group is produced, so no host is found | No |
+| Facts of the hosts a question names (at most 5): label, environment, criticality, exposure (`unknown`), listening ports, counts per tier and KEV | Yes, but only for hosts with an open critical or high finding and known listening ports, see "Admin questions" | No |
 | Documentation chunks for a question: up to 3, found by the question's words | Yes | Yes |
 
-So in this build the data that can reach the model is the operator
-instructions, the zero-count fleet summary, your questions and the
-handbook chunks found for them. Host-specific data stays in NOS in both
-classes, unless you type it into a question yourself.
+In class `external` the model therefore gets the operator instructions,
+the fleet counts, your questions and the handbook chunks found for them.
+Host-specific data stays in NOS, unless you type it into a question yourself.
 
 **Never sent, in either class:** IP addresses and endpoints, fingerprints,
 credentials or their file names, user names, execution output and logs,
@@ -3008,9 +2998,6 @@ Consequences you will notice:
 
 - A card that you **dismiss** still marks executions. Dismissing hides the
   card and changes nothing else.
-- In this build no fix note and no card can come about (see "Status in
-  this build"), so neither rule fires yet and no execution is marked. The
-  rules are kept here for the release that connects the finding sources.
 - While a fix note for a host is stored (at most 30 days, see below), an
   admin who starts the same kind of action on that host **by hand** also
   needs the key. Nothing on the page says why, in this build: the
