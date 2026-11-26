@@ -417,3 +417,106 @@ func TestMethodRolesGuestSnapshotThroughInterceptor(t *testing.T) {
 		}
 	}
 }
+
+// TestMethodRolesPVEImageSurface pins the image preparation RPCs (PV-03a,
+// ADR 0008 amendment 2, D1 (a), D3 (a), D4 (a)): server and admin may
+// propose and commit a preparation and list the images; only the admin may
+// add or remove a local entry; the pve-collector may call none of them.
+// Every method has a role and an integrity-lock entry: the read and the
+// proposal stay open, the commit (which dispatches the preparation) is
+// locked like the provisioning commit, and the local-entry add and remove
+// are locked fail-safe because ADR 0008 amendment 2 (I1) leaves them open
+// for the maintainer.
+func TestMethodRolesPVEImageSurface(t *testing.T) {
+	const (
+		serverUID uint32 = 50001
+		adminUID  uint32 = 50002
+		collUID   uint32 = 50003
+		netUID    uint32 = 50004
+		otherUID  uint32 = 50999
+	)
+	propose := pb.ExecutorService_ProposePVEImagePrepare_FullMethodName
+	commit := pb.ExecutorService_CommitPVEImagePrepare_FullMethodName
+	list := pb.ExecutorService_ListPVEImages_FullMethodName
+	add := pb.ExecutorService_AddPVELocalImage_FullMethodName
+	remove := pb.ExecutorService_RemovePVELocalImage_FullMethodName
+
+	tests := []struct {
+		method string
+		roles  []peercred.Role
+		locked bool
+	}{
+		{propose, []peercred.Role{peercred.RoleServer, peercred.RoleAdmin}, false},
+		{commit, []peercred.Role{peercred.RoleServer, peercred.RoleAdmin}, true},
+		{list, []peercred.Role{peercred.RoleServer, peercred.RoleAdmin}, false},
+		// add and remove are locked fail-safe: ADR 0008 amendment 2 (I1)
+		// leaves their classification open for the maintainer, so they
+		// stay locked until that decision (Wächter 26.11.).
+		{add, []peercred.Role{peercred.RoleAdmin}, true},
+		{remove, []peercred.Role{peercred.RoleAdmin}, true},
+	}
+
+	policy := peercred.NewPolicy(map[uint32][]peercred.Role{
+		serverUID: {peercred.RoleServer},
+		adminUID:  {peercred.RoleAdmin},
+		collUID:   {peercred.RolePVECollector},
+		netUID:    {peercred.RoleNetDevCollector},
+	}, MethodRoles())
+	roles := MethodRoles()
+	for _, tc := range tests {
+		t.Run(tc.method, func(t *testing.T) {
+			got := roles[tc.method]
+			if len(got) != len(tc.roles) {
+				t.Fatalf("roles = %v, want exactly %v", got, tc.roles)
+			}
+			for _, r := range tc.roles {
+				if !slices.Contains(got, r) {
+					t.Errorf("roles = %v, want %v allowed", got, r)
+				}
+			}
+			locked, known := integrityLockedMethods[tc.method]
+			if !known {
+				t.Error("no integrity-lock entry")
+			} else if locked != tc.locked {
+				t.Errorf("integrity lock = %v, want %v", locked, tc.locked)
+			}
+
+			want := map[uint32]bool{}
+			for _, r := range tc.roles {
+				switch r {
+				case peercred.RoleServer:
+					want[serverUID] = true
+				case peercred.RoleAdmin:
+					want[adminUID] = true
+				}
+			}
+			for _, uid := range []uint32{serverUID, adminUID, collUID, netUID, otherUID} {
+				ctx := peer.NewContext(context.Background(), &peer.Peer{AuthInfo: peercred.AuthInfo{UID: uid}})
+				reached := false
+				_, err := policy.UnaryInterceptor(nil)(ctx, nil, &grpc.UnaryServerInfo{FullMethod: tc.method},
+					func(context.Context, any) (any, error) {
+						reached = true
+						return nil, nil
+					})
+				if want[uid] {
+					if err != nil || !reached {
+						t.Errorf("uid %d: err %v reached %v, want allowed", uid, err, reached)
+					}
+				} else if status.Code(err) != codes.PermissionDenied || reached {
+					t.Errorf("uid %d: err %v reached %v, want PermissionDenied", uid, err, reached)
+				}
+			}
+		})
+	}
+
+	// D3 (a): a server-originated local entry is refused by role.
+	for _, m := range []string{add, remove} {
+		if _, ok := policy.Allowed(serverUID, m); ok {
+			t.Errorf("server role may call %s, want admin-only", m)
+		}
+	}
+	// D1 (a): preparation has guest provisioning's proposal roles.
+	if !slices.Equal(roles[propose], roles[pb.ExecutorService_ProposePVEGuestProvision_FullMethodName]) {
+		t.Errorf("%s roles %v, want those of ProposePVEGuestProvision", propose, roles[propose])
+	}
+}
