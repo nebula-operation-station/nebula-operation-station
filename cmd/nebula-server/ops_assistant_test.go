@@ -3,7 +3,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -14,8 +16,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsconfig"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/opsfacts"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsnotes"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
@@ -253,9 +258,33 @@ func TestOpsTriggerCarriesNoDataAndStatusReadsSettings(t *testing.T) {
 	}
 }
 
-// Without the ops token nothing is wired: the Ops routes answer 404.
-func TestOpsRoutesAnswer404WithoutOpsToken(t *testing.T) {
-	uh, err := ui.New(ui.Options{PublicOrigin: testAsstOrigin})
+// opsTokenCfg is an API config with the ops token (ops:read) and no other
+// token; noOpsTokenCfg holds one inventory reader instead.
+var (
+	opsTokenCfg = serverconfig.APIConfig{Enabled: true, Tokens: []serverconfig.APIToken{{
+		Name: serverconfig.DefaultOpsTokenName, SHA256: api.HashToken("ops-test-token"),
+		Scopes: []string{serverconfig.ScopeOpsRead}}}}
+	noOpsTokenCfg = serverconfig.APIConfig{Enabled: true, Tokens: []serverconfig.APIToken{{
+		Name: "reader", SHA256: "00", Scopes: []string{serverconfig.ScopeInventoryRead}}}}
+)
+
+// The Ops tab is wired only with the ops token: without it the wire function
+// is not called, the UI options carry no Ops tab and the Ops routes answer 404.
+// The gate is applyOpsAssistant, which main.go calls.
+func TestOpsTabIsWiredOnlyWithOpsToken(t *testing.T) {
+	wired := 0
+	wire := func() (opsAssistantWiring, error) {
+		wired++
+		return asstWiring(t, &fakeAsstStore{}, true, nil), nil
+	}
+	opts, err := applyOpsAssistant(ui.Options{PublicOrigin: testAsstOrigin}, noOpsTokenCfg, wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.AssistantOps != nil || wired != 0 {
+		t.Fatalf("without the ops token: Ops tab set=%v, wire calls=%d; want none", opts.AssistantOps != nil, wired)
+	}
+	uh, err := ui.New(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,6 +296,172 @@ func TestOpsRoutesAnswer404WithoutOpsToken(t *testing.T) {
 	}
 	if rec := asstRequest(t, h, http.MethodPost, "/assistant/ops/questions", "question=x"); rec.Code != http.StatusNotFound {
 		t.Errorf("POST questions = %d, want 404", rec.Code)
+	}
+
+	opts, err = applyOpsAssistant(ui.Options{PublicOrigin: testAsstOrigin}, opsTokenCfg, wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.AssistantOps == nil || wired != 1 {
+		t.Fatalf("with the ops token: Ops tab set=%v, wire calls=%d; want the tab and one call", opts.AssistantOps != nil, wired)
+	}
+}
+
+// A wiring error stops the server start; it is not swallowed.
+func TestOpsTabWiringErrorIsReturned(t *testing.T) {
+	wantErr := errors.New("ops assistant: settings")
+	_, err := applyOpsAssistant(ui.Options{}, opsTokenCfg, func() (opsAssistantWiring, error) {
+		return opsAssistantWiring{}, wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("applyOpsAssistant = %v, want the wiring error", err)
+	}
+}
+
+// opsAssistantSources counts the reads behind the Ops tab catalog: the
+// inventory hosts and the projection's eligible groups.
+type opsAssistantSources struct {
+	hostReads, groupReads int
+}
+
+func (s *opsAssistantSources) hosts(context.Context) ([]inventory.Host, error) {
+	s.hostReads++
+	return []inventory.Host{{ID: "web-1"}}, nil
+}
+
+func (s *opsAssistantSources) groups(context.Context) ([]opsfacts.Group, error) {
+	s.groupReads++
+	return []opsfacts.Group{{Key: "web-1/os", Digest: "digest-1"}}, nil
+}
+
+// One render of the Ops tab reads the projection and the inventory once, however
+// many cards it shows. A render after the snapshot's window reads them again.
+func TestOpsTabReadsProjectionOncePerRender(t *testing.T) {
+	const cards = 50
+	var notes []opsnotes.Note
+	for i := 1; i <= cards; i++ {
+		notes = append(notes, asstFixNote(int64(i)))
+	}
+	src := &opsAssistantSources{}
+	now := time.Date(2026, 11, 26, 9, 0, 0, 0, time.UTC)
+	w := asstWiring(t, &fakeAsstStore{notes: notes}, true, nil)
+	w.catalog = newOpsAssistantCatalog(src.hosts, src.groups, func() time.Time { return now })
+	h := asstHandler(t, w)
+
+	rec := asstRequest(t, h, http.MethodGet, "/assistant/ops", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /assistant/ops = %d, want 200", rec.Code)
+	}
+	if got := strings.Count(rec.Body.String(), "Update openssl on web-1"); got != cards {
+		t.Fatalf("rendered %d cards, want %d", got, cards)
+	}
+	if src.groupReads != 1 || src.hostReads != 1 {
+		t.Fatalf("one render: projection reads=%d, host reads=%d; want 1 and 1", src.groupReads, src.hostReads)
+	}
+	asstRequest(t, h, http.MethodGet, "/assistant/ops", "")
+	if src.groupReads != 1 || src.hostReads != 1 {
+		t.Fatalf("second render in the same window: projection reads=%d, host reads=%d; want 1 and 1",
+			src.groupReads, src.hostReads)
+	}
+	now = now.Add(opsAssistantSnapshotMaxAge)
+	asstRequest(t, h, http.MethodGet, "/assistant/ops", "")
+	if src.groupReads != 2 || src.hostReads != 2 {
+		t.Fatalf("render after the window: projection reads=%d, host reads=%d; want 2 and 2", src.groupReads, src.hostReads)
+	}
+}
+
+// The production catalog answers from the same projection the ops API serves:
+// the digest of a card the ops API issued is current, and the host check
+// matches the inventory. No fake of the projection is involved.
+func TestOpsAssistantCatalogMatchesOpsAPIDigest(t *testing.T) {
+	env := newVTEnv(t)
+	env.startAndSubmit(t, opsCriticalRecord("CVE-2026-7001"))
+	srcs := opsSources{Findings: env.svc.store, LastResults: opsWireLastResults(t, opsWireSim),
+		Traffic: opsWireTraffic(t), Now: func() time.Time { return opsWireNow }}
+	hosts := func(context.Context) ([]inventory.Host, error) {
+		return []inventory.Host{{ID: "web01", DisplayName: "web01", Environment: inventory.EnvProd,
+			Criticality: inventory.CriticalityHigh}}, nil
+	}
+	groups, err := newOpsAssistantGroups(srcs, hosts, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cat := newOpsAssistantCatalog(hosts, groups, time.Now)
+
+	_, items := opsWorkItems(t, opsWireHandler(t, env.db, srcs, opsconfig.DataClassLab))
+	var digest string
+	for _, it := range items {
+		if it["kind"] == "fix" && it["ref"] == "web01/os" {
+			digest, _ = it["digest"].(string)
+		}
+	}
+	if !strings.HasPrefix(digest, "sha256:") {
+		t.Fatalf("work list has no fix digest for web01/os")
+	}
+	if cur, ok := cat.CurrentDigest(opsnotes.KindFix, "web01/os"); !ok || cur != digest {
+		t.Errorf("CurrentDigest(web01/os) = %q, %v; want the work list digest %q", cur, ok, digest)
+	}
+	if _, ok := cat.CurrentDigest(opsnotes.KindFix, "web02/os"); ok {
+		t.Error("CurrentDigest of an unknown ref reports a group")
+	}
+	if _, ok := cat.CurrentDigest(opsnotes.KindSummary, "web01/os"); ok {
+		t.Error("CurrentDigest of a summary reports a group")
+	}
+	if !cat.HostExists("web01") {
+		t.Error("HostExists(web01) = false, want the inventory host")
+	}
+	if cat.HostExists("web02") {
+		t.Error("HostExists(web02) = true for a host not in the inventory")
+	}
+	if fam, ok := cat.ActionFamily("package.install_security"); !ok || fam == "" {
+		t.Errorf("ActionFamily(package.install_security) = %q, %v; want a family", fam, ok)
+	}
+}
+
+// A failed read of the inventory or the projection denies: HostExists is false
+// (no step button) and CurrentDigest reports no group (card outdated).
+func TestOpsAssistantCatalogFailedReadsDenyTheCard(t *testing.T) {
+	failHosts := func(context.Context) ([]inventory.Host, error) { return nil, errors.New("store down") }
+	failGroups := func(context.Context) ([]opsfacts.Group, error) { return nil, errors.New("store down") }
+	cat := newOpsAssistantCatalog(failHosts, failGroups, time.Now)
+	if cat.HostExists("web-1") {
+		t.Error("HostExists after a failed read = true, want false")
+	}
+	if _, ok := cat.CurrentDigest(opsnotes.KindFix, "web-1/os"); ok {
+		t.Error("CurrentDigest after a failed read reports a group")
+	}
+}
+
+// The question text stays out of the server log: neither the stored question
+// nor the trigger path logs it, whether the trigger was touched or not.
+func TestOpsQuestionTextStaysOutOfTheLog(t *testing.T) {
+	const secret = "secret-question-text-7f3a"
+	for _, name := range []string{"touched", "not-touched"} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "ops-trigger")
+			if name == "not-touched" {
+				path = filepath.Join(t.TempDir(), "missing", "ops-trigger")
+			}
+			var logs bytes.Buffer
+			lg := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			trig := newOpsTrigger(fakeAsstSettings{enabled: true}, path, time.Now, lg)
+			store := &fakeAsstStore{}
+			uh, err := ui.New(withOpsAssistant(ui.Options{PublicOrigin: testAsstOrigin, Log: lg},
+				asstWiring(t, store, true, trig.Touch)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec := asstRequest(t, uh.Handler(), http.MethodPost, "/assistant/ops/questions", "question="+secret)
+			if rec.Code != http.StatusSeeOther {
+				t.Fatalf("POST questions = %d, want 303", rec.Code)
+			}
+			if len(store.questions) != 1 {
+				t.Fatalf("stored %d questions, want 1", len(store.questions))
+			}
+			if strings.Contains(logs.String(), secret) {
+				t.Fatalf("server log holds the question text: %s", logs.String())
+			}
+		})
 	}
 }
 

@@ -23,6 +23,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsfacts"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsnotes"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
@@ -70,56 +71,103 @@ func (h *opsRunHolder) last() (api.OpsRunStatus, bool) {
 	return src.LastOpsStatus()
 }
 
+// opsAssistantSnapshotMaxAge is how long one read of the inventory and the
+// projection serves all cards. A render of the Ops tab asks the catalog once
+// per card; they all share one snapshot, so a render costs one projection and
+// one inventory read, not one per card. The snapshot is at most this old.
+const opsAssistantSnapshotMaxAge = 2 * time.Second
+
+// opsAssistantSnapshot is one read of the catalog's facts. A failed read is
+// kept as failed, so the cards deny until the next window.
+type opsAssistantSnapshot struct {
+	at       time.Time
+	hosts    map[string]bool
+	hostErr  bool
+	digests  map[string]string
+	groupErr bool
+}
+
 // opsAssistantCatalog checks the cards of the Ops tab against the server's
 // current facts: the inventory hosts, and the eligible groups of the same
-// projection the ops API resolves fix notes against (lab data class).
+// projection the ops API resolves fix notes against (lab data class). Reads
+// are shared through one snapshot (opsAssistantSnapshotMaxAge).
 type opsAssistantCatalog struct {
 	hosts  func(ctx context.Context) ([]inventory.Host, error)
 	groups func(ctx context.Context) ([]opsfacts.Group, error)
+	now    func() time.Time
+
+	mu   sync.Mutex
+	snap *opsAssistantSnapshot
 }
 
-var _ ui.AssistantOpsCatalog = opsAssistantCatalog{}
+var _ ui.AssistantOpsCatalog = (*opsAssistantCatalog)(nil)
+
+// newOpsAssistantCatalog returns the catalog over the given reads; now is the
+// clock of the snapshot window.
+func newOpsAssistantCatalog(hosts func(ctx context.Context) ([]inventory.Host, error),
+	groups func(ctx context.Context) ([]opsfacts.Group, error), now func() time.Time) *opsAssistantCatalog {
+	return &opsAssistantCatalog{hosts: hosts, groups: groups, now: now}
+}
+
+// current returns the snapshot of the window, reading the sources when it has
+// expired. The reads run under one timeout each and hold the lock, so
+// concurrent renders wait for one read instead of each doing their own.
+// The ui catalog interface has no request context, so the reads are not tied
+// to the request; each is bounded by opsAssistantCallTimeout.
+func (c *opsAssistantCatalog) current() *opsAssistantSnapshot {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.now()
+	if c.snap != nil && now.Sub(c.snap.at) < opsAssistantSnapshotMaxAge {
+		return c.snap
+	}
+	s := &opsAssistantSnapshot{at: now, hosts: map[string]bool{}, digests: map[string]string{}}
+	hctx, hcancel := context.WithTimeout(context.Background(), opsAssistantCallTimeout)
+	hs, err := c.hosts(hctx)
+	hcancel()
+	if err != nil {
+		s.hostErr = true
+	}
+	for _, h := range hs {
+		s.hosts[h.ID] = true
+	}
+	gctx, gcancel := context.WithTimeout(context.Background(), opsAssistantCallTimeout)
+	gs, err := c.groups(gctx)
+	gcancel()
+	if err != nil {
+		s.groupErr = true
+	}
+	for _, g := range gs {
+		s.digests[g.Key] = g.Digest
+	}
+	c.snap = s
+	return s
+}
 
 // HostExists reports whether the host is in the inventory. A failed read
 // reports false, so no step button is shown.
-func (c opsAssistantCatalog) HostExists(hostID string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), opsAssistantCallTimeout)
-	defer cancel()
-	hs, err := c.hosts(ctx)
-	if err != nil {
-		return false
-	}
-	for _, h := range hs {
-		if h.ID == hostID {
-			return true
-		}
-	}
-	return false
+func (c *opsAssistantCatalog) HostExists(hostID string) bool {
+	s := c.current()
+	return !s.hostErr && s.hosts[hostID]
 }
 
 // ActionFamily returns the family of an allowlisted action.
-func (opsAssistantCatalog) ActionFamily(actionID string) (string, bool) {
+func (*opsAssistantCatalog) ActionFamily(actionID string) (string, bool) {
 	return opsfacts.Families(actionID)
 }
 
 // CurrentDigest returns the digest of the eligible group ref. Only fix notes
 // have groups; any other kind reports false, which marks the card outdated.
-func (c opsAssistantCatalog) CurrentDigest(kind opsnotes.Kind, ref string) (string, bool) {
+func (c *opsAssistantCatalog) CurrentDigest(kind opsnotes.Kind, ref string) (string, bool) {
 	if kind != opsnotes.KindFix {
 		return "", false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), opsAssistantCallTimeout)
-	defer cancel()
-	gs, err := c.groups(ctx)
-	if err != nil {
+	s := c.current()
+	if s.groupErr {
 		return "", false
 	}
-	for _, g := range gs {
-		if g.Key == ref {
-			return g.Digest, true
-		}
-	}
-	return "", false
+	d, ok := s.digests[ref]
+	return d, ok
 }
 
 // newOpsAssistantGroups builds the projection the ops API serves, from the
@@ -177,7 +225,7 @@ func wireOpsAssistant(db *sql.DB, notes *opsnotes.Store, isAdmin func(ctx contex
 	return opsAssistantWiring{
 		store:    notes,
 		isAdmin:  isAdmin,
-		catalog:  opsAssistantCatalog{hosts: hosts, groups: groups},
+		catalog:  newOpsAssistantCatalog(hosts, groups, time.Now),
 		settings: settings,
 		runs:     runs,
 		touch:    touch,
@@ -208,6 +256,21 @@ func (w opsAssistantWiring) touchTrigger() error {
 		return errOpsAssistantNotTouched
 	}
 	return nil
+}
+
+// applyOpsAssistant is the ops token gate of the Ops tab: with the ops token
+// configured it calls wire and sets the tab on the UI options; without it,
+// wire is not called and the options stay as they are (the Ops routes then
+// answer 404). A wiring error is returned, not swallowed.
+func applyOpsAssistant(o ui.Options, cfg serverconfig.APIConfig, wire func() (opsAssistantWiring, error)) (ui.Options, error) {
+	if _, ok := cfg.OpsToken(); !ok {
+		return o, nil
+	}
+	w, err := wire()
+	if err != nil {
+		return o, err
+	}
+	return withOpsAssistant(o, w), nil
 }
 
 // withOpsAssistant sets the Ops tab on the UI options. The admin rule is the

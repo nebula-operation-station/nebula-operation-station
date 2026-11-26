@@ -668,12 +668,11 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 		Traffic:     trafficingest.ExecutionSource{DB: db},
 	}
 	opsRuns := &opsRunHolder{}
-	if _, hasOpsToken := cfg.API.OpsToken(); hasOpsToken {
-		asst, err := wireOpsAssistant(db, opsNotes, isAdmin, opsSrcs, store.List, opsRuns, opsTouch, log)
-		if err != nil {
-			return err
-		}
-		uiOpts = withOpsAssistant(uiOpts, asst)
+	uiOpts, err = applyOpsAssistant(uiOpts, cfg.API, func() (opsAssistantWiring, error) {
+		return wireOpsAssistant(db, opsNotes, isAdmin, opsSrcs, store.List, opsRuns, opsTouch, log)
+	})
+	if err != nil {
+		return err
 	}
 	if err := applyServerFeatureOptions(deps, &uiOpts); err != nil {
 		return err
