@@ -136,6 +136,7 @@ type imageClient struct {
 	mu             sync.Mutex
 	steps          []PveMutationStep
 	templateDigest string
+	tpl            PveTemplateReader
 }
 
 func (c *imageClient) TaskType(method string) (string, bool) { return ImageStepTaskType(method) }
@@ -158,6 +159,29 @@ func (c *imageClient) TargetState(ctx context.Context, rm executordb.PveRemote, 
 		c.mu.Unlock()
 	}
 	return live, err
+}
+
+// TemplateConfig implements PveTemplateReader: through the reader set
+// with setTemplateReader (the production client against a loopback PVE
+// fake), or else the fake's node with the set template digest.
+func (c *imageClient) TemplateConfig(ctx context.Context, rm executordb.PveRemote, node string, vmid uint64, tok pveapi.TokenSupplier) (PveTemplateConfig, error) {
+	c.mu.Lock()
+	tpl, digest := c.tpl, c.templateDigest
+	c.mu.Unlock()
+	if tpl != nil {
+		return tpl.TemplateConfig(ctx, rm, node, vmid, tok)
+	}
+	live, err := c.fakeMutClient.TargetState(ctx, rm, permit.ProviderKindQemu, node, vmid, tok)
+	if err != nil {
+		return PveTemplateConfig{}, err
+	}
+	return PveTemplateConfig{Found: true, Node: live.Node, ConfigDigest: digest}, nil
+}
+
+func (c *imageClient) setTemplateReader(r PveTemplateReader) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.tpl = r
 }
 
 func (c *imageClient) setTemplateDigest(d string) {
