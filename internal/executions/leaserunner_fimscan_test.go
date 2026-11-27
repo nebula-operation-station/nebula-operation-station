@@ -558,3 +558,285 @@ func TestStartedManualFullRunMovesTheFloor(t *testing.T) {
 		})
 	}
 }
+
+// TestFimScanLeaseRunIsRunningWhileItsJobRuns checks that the execution of a
+// dispatched fim.scan job is running, not finished, while the job runs: no
+// execution is ever finished without a finish time.
+func TestFimScanLeaseRunIsRunningWhileItsJobRuns(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	s, f := setupLeases(t, &now, func(n time.Time) *pb.ReadGrant {
+		return leaseEntry(t, fimLeaseDoc(t, n, []string{"web"}, "full"), n)
+	})
+	jf := &jobFake{leaseRunFake: f}
+	s.exec = jf
+	ctx := context.Background()
+
+	s.RunDueReadGrants(ctx)
+	if len(f.runs) != 1 {
+		t.Fatalf("%d runs, want 1 fim.scan run", len(f.runs))
+	}
+	var state string
+	var finished sql.NullInt64
+	if err := s.db.QueryRow(`SELECT state, finished_at FROM executions WHERE action_id = ? AND schedule_id = ?`,
+		permit.FimScanActionID, testGrantID).Scan(&state, &finished); err != nil {
+		t.Fatal(err)
+	}
+	if state != "running" || finished.Valid {
+		t.Fatalf("while the job runs: execution state %q finished %v; want running, unfinished", state, finished)
+	}
+	var bad int
+	if err := s.db.QueryRow(`SELECT count(*) FROM executions WHERE state = 'finished' AND finished_at IS NULL`).Scan(&bad); err != nil {
+		t.Fatal(err)
+	}
+	if bad != 0 {
+		t.Fatalf("%d executions are finished without a finish time", bad)
+	}
+}
+
+// TestFimScanLeaseRunIsFinalWhenItsJobIsCollected checks that collecting the
+// job's outcome sets the execution's final state and its finish time.
+func TestFimScanLeaseRunIsFinalWhenItsJobIsCollected(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	s, f := setupLeases(t, &now, func(n time.Time) *pb.ReadGrant {
+		return leaseEntry(t, fimLeaseDoc(t, n, []string{"web"}, "full"), n)
+	})
+	jf := &jobFake{leaseRunFake: f}
+	s.exec = jf
+	ctx := context.Background()
+
+	s.RunDueReadGrants(ctx)
+	jf.final = &pb.RunStatus{State: "finished", Class: "success", Result: []byte(`{"ok":true}`)}
+	now = now.Add(time.Hour)
+	s.RunDueReadGrants(ctx)
+
+	var state string
+	var finished sql.NullInt64
+	if err := s.db.QueryRow(`SELECT state, finished_at FROM executions WHERE action_id = ? AND schedule_id = ?`,
+		permit.FimScanActionID, testGrantID).Scan(&state, &finished); err != nil {
+		t.Fatal(err)
+	}
+	if state != "finished" || !finished.Valid || finished.Int64 != now.Unix() {
+		t.Fatalf("after collection: execution state %q finished %v; want finished at %d", state, finished, now.Unix())
+	}
+	if !jf.released {
+		t.Fatal("the job's result was not released on the executor after collection")
+	}
+}
+
+// TestFimScanDueCheckCountsADispatchedJobAsStarted checks that a fim.scan job
+// the executor started, still running, moves the host's floor: the due check
+// must not propose the same run again while the job runs.
+func TestFimScanDueCheckCountsADispatchedJobAsStarted(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	s, f := setupLeases(t, &now, func(n time.Time) *pb.ReadGrant {
+		return leaseEntry(t, fimLeaseDoc(t, n, []string{"web"}, "full"), n)
+	})
+	jf := &jobFake{leaseRunFake: f}
+	s.exec = jf
+	ctx := context.Background()
+
+	s.RunDueReadGrants(ctx)
+	started := now
+	now = now.Add(time.Hour)
+	s.RunDueReadGrants(ctx)
+	if len(f.runs) != 1 {
+		t.Fatalf("%d runs, want 1: the running job must not be proposed again", len(f.runs))
+	}
+	canon, _, ok := fimScanModeParams("full")
+	if !ok {
+		t.Fatal(`no fim.scan mode "full"`)
+	}
+	last, err := s.fimScanLastRuns(ctx, canon)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if at, ok := last["web"]; !ok || !at.Equal(started) {
+		t.Fatalf("last full run on web %v (present %v), want %v", at, ok, started)
+	}
+}
+
+// orphanRunning counts the executions stored as running that have no host row,
+// and the finished hosts whose execution is still running. Either one is a row
+// that collectLeaseJobs can never complete.
+func orphanRunning(t *testing.T, s *Service) (orphans, mismatched int) {
+	t.Helper()
+	if err := s.db.QueryRow(`SELECT count(*) FROM executions e WHERE e.state = 'running'
+		AND NOT EXISTS (SELECT 1 FROM execution_hosts h WHERE h.execution_id = e.id)`).Scan(&orphans); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM execution_hosts h JOIN executions e ON e.id = h.execution_id
+		WHERE h.state = 'finished' AND e.state = 'running'`).Scan(&mismatched); err != nil {
+		t.Fatal(err)
+	}
+	return orphans, mismatched
+}
+
+// TestFimScanJobWithoutItsHostRowIsNotStored checks that a fim.scan job whose
+// host row cannot be inserted leaves no execution stored as running: the
+// execution row goes with the failed host row, so no run is left that
+// collectLeaseJobs can never complete.
+func TestFimScanJobWithoutItsHostRowIsNotStored(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	s, f := setupLeases(t, &now, func(n time.Time) *pb.ReadGrant {
+		return leaseEntry(t, fimLeaseDoc(t, n, []string{"web"}, "full"), n)
+	})
+	jf := &jobFake{leaseRunFake: f}
+	s.exec = jf
+	if _, err := s.db.Exec(`CREATE TRIGGER fail_fim_host_insert BEFORE INSERT ON execution_hosts
+		WHEN NEW.state = 'running' AND (SELECT action_id FROM executions WHERE id = NEW.execution_id) = '` + permit.FimScanActionID + `'
+		BEGIN SELECT RAISE(ABORT, 'forced host insert failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+
+	s.RunDueReadGrants(context.Background())
+	if len(f.runs) != 1 {
+		t.Fatalf("%d runs, want 1 fim.scan run", len(f.runs))
+	}
+	if orphans, _ := orphanRunning(t, s); orphans != 0 {
+		t.Fatalf("%d executions are running without a host row; want none", orphans)
+	}
+}
+
+// TestFailedExecutionUpdateLeavesFimScanHostRunning checks that the outcome of
+// a fim.scan job is stored in one transaction: when the execution's final
+// update fails, the host's outcome is not stored either, so the host is never
+// finished while its execution is still running. The job stays running, is
+// not released on the executor, and is stored by the next tick.
+func TestFailedExecutionUpdateLeavesFimScanHostRunning(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	s, f := setupLeases(t, &now, func(n time.Time) *pb.ReadGrant {
+		return leaseEntry(t, fimLeaseDoc(t, n, []string{"web"}, "full"), n)
+	})
+	jf := &jobFake{leaseRunFake: f}
+	s.exec = jf
+	ctx := context.Background()
+
+	s.RunDueReadGrants(ctx)
+	if len(f.runs) != 1 {
+		t.Fatalf("%d runs, want 1 fim.scan run", len(f.runs))
+	}
+	if _, err := s.db.Exec(`CREATE TRIGGER fail_fim_finish BEFORE UPDATE ON executions
+		WHEN NEW.state = 'finished' AND OLD.action_id = '` + permit.FimScanActionID + `'
+		BEGIN SELECT RAISE(ABORT, 'forced finish failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	jf.final = &pb.RunStatus{State: "finished", Class: "success", Result: []byte(`{"ok":true}`)}
+	now = now.Add(time.Hour)
+	s.RunDueReadGrants(ctx)
+
+	var hostState, execState string
+	var finished sql.NullInt64
+	if err := s.db.QueryRow(`SELECT h.state, e.state, e.finished_at FROM execution_hosts h
+		JOIN executions e ON e.id = h.execution_id WHERE e.action_id = ? AND e.schedule_id = ?`,
+		permit.FimScanActionID, testGrantID).Scan(&hostState, &execState, &finished); err != nil {
+		t.Fatal(err)
+	}
+	if hostState != "running" || execState != "running" || finished.Valid {
+		t.Fatalf("after a failed final update: host %q execution %q finished %v; want both running, unfinished",
+			hostState, execState, finished)
+	}
+	if jf.released {
+		t.Fatal("the job's result was released although its outcome was not stored")
+	}
+	if orphans, mismatched := orphanRunning(t, s); orphans != 0 || mismatched != 0 {
+		t.Fatalf("%d running executions without a host, %d finished hosts of running executions; want none", orphans, mismatched)
+	}
+
+	if _, err := s.db.Exec(`DROP TRIGGER fail_fim_finish`); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Hour)
+	s.RunDueReadGrants(ctx)
+	if err := s.db.QueryRow(`SELECT h.state, e.state, e.finished_at FROM execution_hosts h
+		JOIN executions e ON e.id = h.execution_id WHERE e.action_id = ? AND e.schedule_id = ?`,
+		permit.FimScanActionID, testGrantID).Scan(&hostState, &execState, &finished); err != nil {
+		t.Fatal(err)
+	}
+	if hostState != "finished" || execState != "finished" || !finished.Valid || finished.Int64 != now.Unix() {
+		t.Fatalf("after the next tick: host %q execution %q finished %v; want both finished at %d",
+			hostState, execState, finished, now.Unix())
+	}
+	if !jf.released {
+		t.Fatal("the job's result was not released after it was stored")
+	}
+}
+
+// TestLegacyFimScanRowWithoutFinishTimeIsCompleted checks the repair of a row
+// that an earlier version stored as finished without a finish time while its
+// host was still running: collecting the job completes both.
+func TestLegacyFimScanRowWithoutFinishTimeIsCompleted(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	s, f := setupLeases(t, &now, func(n time.Time) *pb.ReadGrant {
+		return leaseEntry(t, fimLeaseDoc(t, n, []string{"web"}, "full"), n)
+	})
+	jf := &jobFake{leaseRunFake: f, final: &pb.RunStatus{State: "finished", Class: "success", Result: []byte(`{"ok":true}`)}}
+	s.exec = jf
+	ctx := context.Background()
+
+	a, ok := actions.Lookup(permit.FimScanActionID)
+	if !ok {
+		t.Fatal("fim.scan is not in the catalog")
+	}
+	const id = "5c3d1e2f-0a1b-4c2d-8e3f-a1b2c3d4e5f6"
+	s.storeLeaseJob(ctx, testGrantID, a, canonical.Target{HostID: "web", HostKeyFingerprint: leaseWebKey}, "nebula-default", []byte(fimCanonFull), id)
+	if _, err := s.db.Exec(`UPDATE executions SET state = 'finished' WHERE id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.collectLeaseJobs(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var hostState, execState string
+	var finished sql.NullInt64
+	if err := s.db.QueryRow(`SELECT h.state, e.state, e.finished_at FROM execution_hosts h
+		JOIN executions e ON e.id = h.execution_id WHERE e.id = ?`, id).Scan(&hostState, &execState, &finished); err != nil {
+		t.Fatal(err)
+	}
+	if hostState != "finished" || execState != "finished" || !finished.Valid || finished.Int64 != now.Unix() {
+		t.Fatalf("legacy row after collection: host %q execution %q finished %v; want both finished at %d",
+			hostState, execState, finished, now.Unix())
+	}
+}
+
+// unknownRunFake answers GetRun for every run as NotFound: the executor has no
+// record of the run.
+type unknownRunFake struct {
+	*leaseRunFake
+}
+
+func (f *unknownRunFake) GetRun(_ context.Context, _ *pb.GetRunRequest, _ ...grpc.CallOption) (*pb.GetRunResponse, error) {
+	return nil, status.Error(codes.NotFound, "no such run")
+}
+
+// TestFimScanJobTheExecutorNoLongerKnowsIsFinalWhenCollected checks the
+// NotFound branch of collectLeaseJobs: the host ends as unknown and the
+// execution's state and finish time are set together.
+func TestFimScanJobTheExecutorNoLongerKnowsIsFinalWhenCollected(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	s, f := setupLeases(t, &now, func(n time.Time) *pb.ReadGrant {
+		return leaseEntry(t, fimLeaseDoc(t, n, []string{"web"}, "full"), n)
+	})
+	s.exec = &unknownRunFake{leaseRunFake: f}
+	ctx := context.Background()
+
+	a, ok := actions.Lookup(permit.FimScanActionID)
+	if !ok {
+		t.Fatal("fim.scan is not in the catalog")
+	}
+	const id = "7e8f9a0b-1c2d-4e3f-9a4b-5c6d7e8f9a0b"
+	s.storeLeaseJob(ctx, testGrantID, a, canonical.Target{HostID: "web", HostKeyFingerprint: leaseWebKey}, "nebula-default", []byte(fimCanonFull), id)
+
+	if err := s.collectLeaseJobs(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var hostState, class, execState string
+	var finished sql.NullInt64
+	if err := s.db.QueryRow(`SELECT h.state, h.class, e.state, e.finished_at FROM execution_hosts h
+		JOIN executions e ON e.id = h.execution_id WHERE e.id = ?`, id).Scan(&hostState, &class, &execState, &finished); err != nil {
+		t.Fatal(err)
+	}
+	if hostState != "finished" || class != "unknown" || execState != "finished" || !finished.Valid || finished.Int64 != now.Unix() {
+		t.Fatalf("after NotFound: host %q class %q execution %q finished %v; want finished, unknown, finished at %d",
+			hostState, class, execState, finished, now.Unix())
+	}
+}

@@ -625,13 +625,14 @@ func (s *Service) ExpirePending(ctx context.Context, now time.Time) (int, error)
 // Resume restarts the dispatchers of executions that were approved or
 // running when the server stopped. Attached runs that were in flight have
 // an unknown outcome on the server side; the executor never re-runs them.
+// Durable lease jobs are not restarted: collectLeaseJobs reads their outcome.
 func (s *Service) Resume(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `UPDATE execution_hosts SET state = 'finished', class = 'unknown',
 			detail = 'the server restarted during an attached run; see the executor log', finished_at = ?
 		WHERE state = 'running' AND execution_id IN (SELECT id FROM executions WHERE durable = 0)`, s.now().Unix()); err != nil {
 		return err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM executions WHERE state IN ('approved', 'running')`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM executions WHERE state IN ('approved', 'running') AND NOT (`+leaseJobRule+`)`, leaseRunRequirement)
 	if err != nil {
 		return err
 	}
@@ -870,18 +871,37 @@ func refusal(err error) string {
 }
 
 func (s *Service) finishHost(id, actionID, host, class, detail string, exit int, result, log []byte, truncated bool) {
-	if len(detail) > 1000 {
-		detail = detail[:1000]
-	}
 	// fin is the one clock read of the finish: the finish row, the observer and
 	// the ops state all use it.
 	fin := s.now()
-	if _, err := s.db.ExecContext(s.ctx, `UPDATE execution_hosts SET state = 'finished', class = ?, detail = ?, exit_code = ?, result = ?, log = ?,
-			log_truncated = ?, finished_at = ? WHERE execution_id = ? AND host_id = ?`,
-		class, detail, exit, result, log, boolInt(truncated), fin.Unix(), id, host); err != nil {
+	if err := writeHostFinish(s.ctx, s.db, fin, id, host, class, detail, exit, result, log, truncated); err != nil {
 		s.log.Error("execution host finish", "execution", id, "host", host, "error", err.Error())
 		return
 	}
+	s.hostFinished(id, actionID, host, class, exit, result, fin)
+}
+
+// execer is the statement runner of *sql.DB and *sql.Tx.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// writeHostFinish stores the outcome of one host of an execution at fin.
+func writeHostFinish(ctx context.Context, db execer, fin time.Time, id, host, class, detail string, exit int, result, log []byte, truncated bool) error {
+	if len(detail) > 1000 {
+		detail = detail[:1000]
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE execution_hosts SET state = 'finished', class = ?, detail = ?, exit_code = ?, result = ?, log = ?,
+			log_truncated = ?, finished_at = ? WHERE execution_id = ? AND host_id = ?`,
+		class, detail, exit, result, log, boolInt(truncated), fin.Unix(), id, host); err != nil {
+		return fmt.Errorf("finish host %s of execution %s: %w", host, id, err)
+	}
+	return nil
+}
+
+// hostFinished runs what follows a stored host outcome: the audit line, the
+// observers and the ops state. It runs only after the outcome is committed.
+func (s *Service) hostFinished(id, actionID, host, class string, exit int, result []byte, fin time.Time) {
 	s.log.Info("audit", "kind", "execution_host_finished", "execution", id, "host", host, "class", class, "exit", exit)
 	if class == classSkipped || class == classNotRun {
 		return // nothing ran on the host: its state did not change
