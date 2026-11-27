@@ -474,25 +474,26 @@ func (v *vulnService) sweepOnce(ctx context.Context) (vulnstore.PruneResult, err
 	if serr := v.sweepSnapshots(sctx); serr != nil {
 		v.log.Error("vulnerability inventory: prune snapshots", "error", serr)
 	}
-	// basisErr records the findings whose basis could not be judged because
-	// the classifier failed, so the log tells a failed read apart from a
-	// component NOS really does not know.
-	basisErr := map[vulnfinding.Key]bool{}
+	// basisErrs counts the findings whose basis could not be judged because
+	// the classifier failed. Such a finding keeps its human state in this
+	// sweep (D6); the log says so, which tells a failed read apart from a
+	// component NOS really does not know (basis_unknown).
+	basisErrs := 0
 	basis := func(ctx context.Context, f vulnstore.Finding) (string, bool, error) {
 		ver, known, berr := v.humanBasis(ctx, f)
 		if berr != nil {
-			basisErr[f.Key] = true
+			basisErrs++
 		}
 		return ver, known, berr
 	}
 	reopened, rerr := v.store.ReviewHumanStates(sctx, basis)
 	cancel()
 	for _, r := range reopened {
-		v.log.Info("vulnerability human state re-opened", "finding_key", r.Key.String(), "reason", string(r.Reason),
-			"basis_error", basisErr[r.Key])
+		v.log.Info("vulnerability human state re-opened", "finding_key", r.Key.String(), "reason", string(r.Reason))
 	}
 	if rerr != nil {
-		v.log.Error("vulnerability store: review human states", "error", rerr, "reopened", len(reopened))
+		v.log.Error("vulnerability store: review human states", "error", rerr, "reopened", len(reopened),
+			"basis_error", basisErrs)
 	}
 	attrs := []any{"resumed", res.ResumedRuns, "aborted", res.AbortedRuns, "deleted_findings", res.DeletedFindings,
 		"cleared_assessment", res.ClearedAssessment, "deleted_runs", res.DeletedRuns, "deleted_history", res.DeletedHistory}

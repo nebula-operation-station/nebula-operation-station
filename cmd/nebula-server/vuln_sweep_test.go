@@ -3,7 +3,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -167,5 +171,41 @@ func TestSweepOpenFindingsAreNotReviewed(t *testing.T) {
 	}
 	if got := x.state(t, f); got != vulnstore.StateOpen {
 		t.Fatalf("state = %s, want open", got)
+	}
+}
+
+// TestSweepKeepsAcceptedRiskWhenClassifierFails: a classifier failure in the
+// sweep is not an unknown component (D6). Here the newest read keeps moving
+// while NOS reads the pair (errVulnReadRace), so the basis cannot be judged.
+// The accepted risk stays accepted and the log says the basis could not be
+// judged (basis_error), which separates it from a component NOS really does
+// not know.
+func TestSweepKeepsAcceptedRiskWhenClassifierFails(t *testing.T) {
+	ctx := context.Background()
+	x := newVDEnv(t, "alice", nil)
+	f := vdFinding(t, x.e, "CVE-2026-8907")
+	d := vdAccept(x, f)
+	id := x.begin(t, "alice", d)
+	if err := vdCommit(x, "alice", id, d); err != nil {
+		t.Fatalf("commit = %v", err)
+	}
+	x.e.clk.Add(clsLag + 2*time.Minute)
+	n := 0
+	x.e.svc.classifier.betweenReads = func() {
+		n++
+		clsPut(t, x.e, clsRead(fmt.Sprintf("bm%d-%s", n, f.Key.String()[:8]), x.e.clk.Now().Add(time.Duration(n)*time.Second),
+			true, clsKernel("6.1.119-1"), clsComp("openssl", clsOld)))
+	}
+	var logs bytes.Buffer
+	x.e.svc.log = slog.New(slog.NewTextHandler(&logs, nil))
+
+	if _, err := x.e.svc.sweepOnce(ctx); err != nil {
+		t.Fatalf("sweep with failing classifier: %v", err)
+	}
+	if got := x.state(t, f); got != vulnstore.StateAcceptedRisk {
+		t.Fatalf("state after sweep with failing classifier = %s, want accepted_risk", got)
+	}
+	if !strings.Contains(logs.String(), "basis_error=1") {
+		t.Fatalf("log does not name the basis error:\n%s", logs.String())
 	}
 }
