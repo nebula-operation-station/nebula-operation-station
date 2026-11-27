@@ -631,6 +631,11 @@ func (p *PveImages) Prepare(ctx context.Context, req PveImagePrepareRequest) (Pv
 	digest, err := p.liveTemplate(ctx, rm, req.Node, req.VMID)
 	if err != nil {
 		p.auditUnrecorded(req, res.ExecutionID, "template_unreadable")
+		if errors.Is(err, ErrPveTemplateNotPrepared) {
+			// The template was just built: "gone" here is a template that
+			// cannot be read back, never one that was not prepared.
+			return PveTemplateRecord{}, fmt.Errorf("read prepared template %d: gone after the run: %w", req.VMID, ErrPveTemplateUnreadable)
+		}
 		return PveTemplateRecord{}, err
 	}
 	rec := PveTemplateRecord{
@@ -706,7 +711,9 @@ func validHexDigest(s string) bool {
 // the preparation and that the live template configuration equals the
 // recorded one. Any difference (a template changed, moved or removed
 // outside NOS, a re-preparation, a withdrawn catalog entry, a re-pinned
-// remote) fails the binding.
+// remote) fails the binding: a template the remote reports as not existing
+// with ErrPveTemplateNotPrepared, a template that cannot be read with
+// ErrPveTemplateUnreadable.
 func (p *PveImages) BindTemplate(ctx context.Context, b PveTemplateBinding) (PveTemplateRecord, error) {
 	if err := p.checkDeps(); err != nil {
 		return PveTemplateRecord{}, err

@@ -579,7 +579,10 @@ func TestBlockedOrRemovedRemoteRefusesReprepareBeforeAnyPVEChange(t *testing.T) 
 		change func(db *executordb.DB) error
 		want   error
 	}{
-		"blocked": {func(db *executordb.DB) error { _, err := db.BlockRemote(mutRemote, "pin mismatch", "executor"); return err }, ErrPveRemoteChanged},
+		"blocked": {func(db *executordb.DB) error {
+			_, err := db.BlockRemote(mutRemote, "pin mismatch", "executor")
+			return err
+		}, ErrPveRemoteChanged},
 		"removed": {func(db *executordb.DB) error { _, err := db.RemoveRemote(mutRemote, "admin"); return err }, executordb.ErrRemoteNotFound},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -633,8 +636,9 @@ func TestPrepareAuditsGoneTemplateAfterRun(t *testing.T) {
 			e := newReprepEnv(t)
 			req := e.approveImage(prepareReq(imgUbuntuID, 9000))
 			e.tpl.set(gone)
-			if _, err := e.imgs.Prepare(context.Background(), req); err == nil {
-				t.Fatal("prepare recorded a template that reads back as gone")
+			_, err := e.imgs.Prepare(context.Background(), req)
+			if !errors.Is(err, ErrPveTemplateUnreadable) || errors.Is(err, ErrPveTemplateNotPrepared) {
+				t.Fatalf("prepare of a template that reads back as gone: %v", err)
 			}
 			logs := e.logs.String()
 			if !strings.Contains(logs, "pve_template_unrecorded") || !strings.Contains(logs, "template_unreadable") {
