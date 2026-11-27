@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnstore"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
 
 // TestSweepReopensAcceptedRiskWhenBasisChanges: a sweep re-checks the human
@@ -43,6 +44,78 @@ func TestSweepReopensAcceptedRiskWhenBasisChanges(t *testing.T) {
 	}
 	if got := x.state(t, f); got != vulnstore.StateOpen {
 		t.Fatalf("state after sweep with changed basis = %s, want open", got)
+	}
+}
+
+// TestSweepReopensFalsePositiveWhenBasisChanges: a false positive is bound to
+// its version basis like an accepted risk (ADR 0011 D4, D6). Unchanged, it
+// stays; once NOS reads a different version the next sweep re-opens it.
+func TestSweepReopensFalsePositiveWhenBasisChanges(t *testing.T) {
+	ctx := context.Background()
+	x := newVDEnv(t, "alice", nil)
+	f := vdFinding(t, x.e, "CVE-2026-8904")
+	d := ui.VulnDecision{Kind: ui.VulnFalsePositive, Key: f.Key, Category: vulnstore.CategoryVendorDisputed, Reason: "vendor disputes it"}
+	id := x.begin(t, "alice", d)
+	if err := vdCommit(x, "alice", id, d); err != nil {
+		t.Fatalf("commit = %v", err)
+	}
+	if _, err := x.e.svc.sweepOnce(ctx); err != nil {
+		t.Fatalf("sweep with unchanged basis: %v", err)
+	}
+	if got := x.state(t, f); got != vulnstore.StateFalsePositive {
+		t.Fatalf("state after sweep with unchanged basis = %s, want false_positive", got)
+	}
+
+	x.e.clk.Add(clsLag + 2*time.Minute)
+	clsPut(t, x.e, clsRead("r-fp-changed-"+f.Key.String()[:8], x.e.clk.Now(), true, clsKernel("6.1.119-1"), clsComp("openssl", clsNew)))
+	if _, err := x.e.svc.sweepOnce(ctx); err != nil {
+		t.Fatalf("sweep with changed basis: %v", err)
+	}
+	if got := x.state(t, f); got != vulnstore.StateOpen {
+		t.Fatalf("state after sweep with changed basis = %s, want open", got)
+	}
+}
+
+// TestSweepReopensExpiredAcceptedRisk: an accepted risk re-opens once its
+// expiry has passed, even though NOS's basis did not change (D6).
+func TestSweepReopensExpiredAcceptedRisk(t *testing.T) {
+	ctx := context.Background()
+	x := newVDEnv(t, "alice", nil)
+	f := vdFinding(t, x.e, "CVE-2026-8905")
+	d := vdAccept(x, f)
+	id := x.begin(t, "alice", d)
+	if err := vdCommit(x, "alice", id, d); err != nil {
+		t.Fatalf("commit = %v", err)
+	}
+	// The decision expires after thirty days; the sweep is past that.
+	x.e.clk.Add(31 * 24 * time.Hour)
+	if _, err := x.e.svc.sweepOnce(ctx); err != nil {
+		t.Fatalf("sweep after expiry: %v", err)
+	}
+	if got := x.state(t, f); got != vulnstore.StateOpen {
+		t.Fatalf("state after expiry = %s, want open", got)
+	}
+}
+
+// TestSweepReopensAcceptedRiskWhenComponentUnknown: when NOS's own read no
+// longer names the component of an accepted risk, NOS cannot judge its
+// version basis and the sweep re-opens the risk (basis_unknown, D6).
+func TestSweepReopensAcceptedRiskWhenComponentUnknown(t *testing.T) {
+	ctx := context.Background()
+	x := newVDEnv(t, "alice", nil)
+	f := vdFinding(t, x.e, "CVE-2026-8906")
+	d := vdAccept(x, f)
+	id := x.begin(t, "alice", d)
+	if err := vdCommit(x, "alice", id, d); err != nil {
+		t.Fatalf("commit = %v", err)
+	}
+	x.e.clk.Add(clsLag + 2*time.Minute)
+	clsPut(t, x.e, clsRead("r-unknown-"+f.Key.String()[:8], x.e.clk.Now(), true, clsKernel("6.1.119-1"), clsComp("other-pkg", clsNew)))
+	if _, err := x.e.svc.sweepOnce(ctx); err != nil {
+		t.Fatalf("sweep with unknown component: %v", err)
+	}
+	if got := x.state(t, f); got != vulnstore.StateOpen {
+		t.Fatalf("state after sweep with unknown component = %s, want open", got)
 	}
 }
 

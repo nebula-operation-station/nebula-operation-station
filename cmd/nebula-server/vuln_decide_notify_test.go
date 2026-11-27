@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnnotify"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnstore"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
 
@@ -43,6 +44,29 @@ func TestMarkResetCommitNotifiesOnce(t *testing.T) {
 	vdDrainEvents(x.e)
 	if got := x.e.sink.reasons(vulnnotify.KindFeedMarkReset); len(got) != 1 {
 		t.Fatalf("mark reset events after replay = %d, want still 1", len(got))
+	}
+}
+
+// TestMarkResetFailingInStoreRaisesNoEvent: a mark reset that reaches
+// ResetMark and fails there (the audit write fails, so the reset rolls back)
+// returns an error, raises no vuln.feed_mark_reset event, and leaves the mark
+// as it was.
+func TestMarkResetFailingInStoreRaisesNoEvent(t *testing.T) {
+	ctx := context.Background()
+	x := newVDEnv(t, "alice", func(a vulnstore.DecisionAuditor) vulnstore.DecisionAuditor { return vdFailingAudit{inner: a} })
+	run := vdMarkRegressed(t, x.e)
+	d := ui.VulnDecision{Kind: ui.VulnMarkReset, SourceID: "debian-tracker", RunID: run, Reason: "feed was rolled back"}
+	id := x.begin(t, "alice", d)
+	if err := vdCommit(x, "alice", id, d); err == nil {
+		t.Fatal("commit = nil, want error: the audit line failed")
+	}
+	vdDrainEvents(x.e)
+	if got := x.e.sink.reasons(vulnnotify.KindFeedMarkReset); len(got) != 0 {
+		t.Fatalf("mark reset events = %d, want none after a failed reset", len(got))
+	}
+	view, err := x.e.svc.store.MarkResetCandidate(ctx, "debian-tracker")
+	if err != nil || view.Probation || view.RunID != run {
+		t.Fatalf("reset view = %+v, %v; want the mark unchanged (run %s, not on probation)", view, err, run)
 	}
 }
 
