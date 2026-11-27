@@ -3,14 +3,20 @@ package ui_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
@@ -58,6 +64,193 @@ func (f *fakeProvision) ListPVEImages(_ context.Context, _ *pb.ListPVEImagesRequ
 		return &pb.ListPVEImagesResponse{}, nil
 	}
 	return f.images, nil
+}
+
+// ProposePVEImagePrepare binds pve.image.prepare on the node under dpPin.
+func (f *fakeProvision) ProposePVEImagePrepare(_ context.Context, in *pb.ProposePVEImagePrepareRequest, _ ...grpc.CallOption) (*pb.ProposePVEImagePrepareResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.prepProposed = append(f.prepProposed, in.GetSpec())
+	target, err := permit.ProviderMutationTarget{RemoteID: in.GetSpec().GetRemoteId(), TrustPin: dpPin, Kind: "node", Node: in.GetSpec().GetNode()}.RiskTarget()
+	if err != nil {
+		return nil, err
+	}
+	rq := canonical.Request{RequestVersion: 1, ExecutionID: "exec-prep-1", ActionID: "pve.image.prepare", ModuleVersion: "1.0.0",
+		ArtifactSHA256: strings.Repeat("a2", 32), ParametersHash: strings.Repeat("0e", 32), CredentialRefs: []string{"pve-lab-action"},
+		RiskClass: canonical.RiskHigh, StagePlanHash: strings.Repeat("5f", 32), ExpiryUnix: time.Now().Add(5 * time.Minute).Unix(),
+		ResolvedTargets: []canonical.Target{target}}
+	if f.prepMutate != nil {
+		f.prepMutate(&rq)
+	}
+	c, err := canonical.Encode(rq)
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(c)
+	sha := dpImageSHA
+	if f.prepSHA != "" {
+		sha = f.prepSHA
+	}
+	return &pb.ProposePVEImagePrepareResponse{
+		Image: &pb.PVEImage{Image: &pb.PVECatalogImage{Id: in.GetSpec().GetImageId(), Sha256: sha}, Trust: "signed"},
+		Permit: &pb.ProposeExecutionResponse{ExecutionDigest: hex.EncodeToString(sum[:]), CanonicalRequest: c,
+			ApprovalRequirement: f.requirement, RiskClass: pb.RiskClass_RISK_CLASS_HIGH,
+			ChallengeExpiryUnix: time.Now().Add(5 * time.Minute).Unix(), RequestOptionsJson: []byte(`{"challenge":"cHJlcA"}`)}}, nil
+}
+
+// CommitPVEImagePrepare answers the record the preparation wrote.
+func (f *fakeProvision) CommitPVEImagePrepare(_ context.Context, in *pb.CommitPVEImagePrepareRequest, _ ...grpc.CallOption) (*pb.CommitPVEImagePrepareResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.prepCommits = append(f.prepCommits, in)
+	s := in.GetSpec()
+	return &pb.CommitPVEImagePrepareResponse{ExecutionId: "exec-prep-1", Template: &pb.PVETemplateRecord{RemoteId: s.GetRemoteId(),
+		Node: s.GetNode(), Storage: s.GetStorage(), ImageId: s.GetImageId(), Trust: "signed", Vmid: s.GetVmid(), Generation: 3,
+		SourceSha256: dpImageSHA, ExecutionId: "exec-prep-1", PreparedAtUnix: time.Now().Unix()}}, nil
+}
+
+// prepCounts returns the number of prepare proposals, assertions and commits.
+func (f *fakeProvision) prepCounts() (int, int, int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.prepProposed), len(f.assertions), len(f.prepCommits)
+}
+
+// dpPrepareForm is a preparation of the catalog image on the test node.
+func dpPrepareForm() url.Values {
+	return url.Values{"remote": {dpRemote}, "node": {dpNode}, "storage": {"local-lvm"}, "import_storage": {"local"},
+		"image": {dpImageID}, "vmid": {"9100"}}
+}
+
+// prepareIDRe finds the approval button's preparation ID on the page.
+var prepareIDRe = regexp.MustCompile(`data-id="([0-9a-f]{32})" data-options="[^"]*" data-commit="/deploy/images/approve"`)
+
+// TestImagesPrepareIsApprovedWithTheUsersAssertion: a preparation is
+// proposed over ProposePVEImagePrepare, shown with an approval button, and
+// committed only after the user's security key assertion was accepted; the
+// commit carries the proposed spec and digest.
+func TestImagesPrepareIsApprovedWithTheUsersAssertion(t *testing.T) {
+	e := newDPEnv(t)
+	code, body, loc := e.do(t, http.MethodPost, "/deploy/images/prepare", gpFormCT, dpPrepareForm().Encode())
+	if code != http.StatusSeeOther || loc != "/deploy/images" {
+		t.Fatalf("prepare = %d %q %q", code, loc, body)
+	}
+	if p, a, c := e.prov.prepCounts(); p != 1 || a != 0 || c != 0 {
+		t.Fatalf("after propose: proposals %d assertions %d commits %d", p, a, c)
+	}
+	_, page, _ := e.do(t, http.MethodGet, "/deploy/images", "", "")
+	m := prepareIDRe.FindStringSubmatch(page)
+	if m == nil {
+		t.Fatalf("no approval button on the page: %s", page)
+	}
+	for _, want := range []string{"pve.image.prepare", dpImageSHA, "9100", "schedules.js", "webauthn.js"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("the page lacks %q", want)
+		}
+	}
+	if code, body, _ := e.do(t, http.MethodPost, "/deploy/images/approve", "application/json", approveJSON(m[1])); code != http.StatusOK {
+		t.Fatalf("approve = %d %q", code, body)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		_, page, _ = e.do(t, http.MethodGet, "/deploy/images", "", "")
+		if strings.Contains(page, `class="prepare-state">prepared<`) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the preparation never finished: %s", page)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, a, c := e.prov.prepCounts(); a != 1 || c != 1 {
+		t.Fatalf("assertions %d commits %d, want 1 and 1", a, c)
+	}
+	e.prov.mu.Lock()
+	defer e.prov.mu.Unlock()
+	cm := e.prov.prepCommits[0]
+	if cm.GetSpec().GetVmid() != 9100 || cm.GetSpec().GetImageId() != dpImageID || cm.GetSpec().GetImportStorage() != "local" ||
+		len(cm.GetExecutionDigest()) != 64 {
+		t.Errorf("commit %v", cm)
+	}
+	// A second approval of the same preparation is refused.
+	if code, _, _ := e.do(t, http.MethodPost, "/deploy/images/approve", "application/json", approveJSON(m[1])); code != http.StatusNotFound {
+		t.Errorf("second approve = %d, want 404", code)
+	}
+}
+
+// TestImagesPrepareRefusesWhatIsNotListed: only a listed catalog image can be
+// proposed, with valid fields; an unreachable catalog proposes nothing.
+func TestImagesPrepareRefusesWhatIsNotListed(t *testing.T) {
+	cases := map[string]struct {
+		mod  func(url.Values)
+		down bool
+		want int
+	}{
+		"image not in catalog": {mod: func(f url.Values) { f.Set("image", "fedora-41") }, want: http.StatusBadRequest},
+		"script image":         {mod: func(f url.Values) { f.Set("image", "<script>") }, want: http.StatusBadRequest},
+		"vmid too small":       {mod: func(f url.Values) { f.Set("vmid", "99") }, want: http.StatusBadRequest},
+		"vmid not a number":    {mod: func(f url.Values) { f.Set("vmid", "9100x") }, want: http.StatusBadRequest},
+		"no import storage":    {mod: func(f url.Values) { f.Del("import_storage") }, want: http.StatusBadRequest},
+		"unknown remote":       {mod: func(f url.Values) { f.Set("remote", "other") }, want: http.StatusConflict},
+		"catalog unavailable":  {mod: func(url.Values) {}, down: true, want: http.StatusConflict},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newDPEnv(t)
+			if c.down {
+				e.prov.imagesErr = context.DeadlineExceeded
+			}
+			f := dpPrepareForm()
+			c.mod(f)
+			if code, body, _ := e.do(t, http.MethodPost, "/deploy/images/prepare", gpFormCT, f.Encode()); code != c.want {
+				t.Fatalf("prepare = %d %q, want %d", code, body, c.want)
+			}
+			if p, _, _ := e.prov.prepCounts(); p != 0 {
+				t.Error("a refused preparation reached the executor")
+			}
+		})
+	}
+}
+
+// TestImagesPrepareWithADifferentBindingCannotBeApproved: when the executor
+// binds another action, target or image SHA-256 than requested, the page
+// shows the difference and no assertion is relayed.
+func TestImagesPrepareWithADifferentBindingCannotBeApproved(t *testing.T) {
+	cases := map[string]func(*fakeProvision){
+		"other action": func(f *fakeProvision) {
+			f.prepMutate = func(r *canonical.Request) { r.ActionID = "pve.guest.provision" }
+		},
+		"other node": func(f *fakeProvision) {
+			f.prepMutate = func(r *canonical.Request) {
+				tg, _ := permit.ProviderMutationTarget{RemoteID: dpRemote, TrustPin: dpPin, Kind: "node", Node: "p2"}.RiskTarget()
+				r.ResolvedTargets = []canonical.Target{tg}
+			}
+		},
+		"other image sha": func(f *fakeProvision) { f.prepSHA = strings.Repeat("cd", 32) },
+	}
+	for name, mod := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newDPEnv(t)
+			mod(e.prov)
+			if code, body, _ := e.do(t, http.MethodPost, "/deploy/images/prepare", gpFormCT, dpPrepareForm().Encode()); code != http.StatusSeeOther {
+				t.Fatalf("prepare = %d %q", code, body)
+			}
+			_, page, _ := e.do(t, http.MethodGet, "/deploy/images", "", "")
+			if prepareIDRe.MatchString(page) || !strings.Contains(page, "differs from the request") {
+				t.Fatalf("a differing binding is approvable: %s", page)
+			}
+			id := regexp.MustCompile(`data-prepare="([0-9a-f]{32})"`).FindStringSubmatch(page)
+			if id == nil {
+				t.Fatal("the preparation is not listed")
+			}
+			if code, _, _ := e.do(t, http.MethodPost, "/deploy/images/approve", "application/json", approveJSON(id[1])); code != http.StatusNotFound {
+				t.Errorf("approve = %d, want 404", code)
+			}
+			if _, a, c := e.prov.prepCounts(); a != 0 || c != 0 {
+				t.Errorf("assertions %d commits %d after a differing binding", a, c)
+			}
+		})
+	}
 }
 
 // withRecord returns the default records with one record replaced by edit.

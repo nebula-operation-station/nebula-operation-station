@@ -298,6 +298,8 @@ type Handler struct {
 	deployIPAM    DeployIPAM
 	deployBatches DeployBatches
 	deployRuns    *deployRuns
+	// imagePrepares are the proposed image preparations (deploy_images.go).
+	imagePrepares *imagePrepares
 	// containerBatches proposes container update and rollback batches.
 	containerBatches ContainerBatches
 	// containerTagPolicy compares tags for a tag change; nil offers
@@ -425,6 +427,7 @@ func New(o Options) (*Handler, error) {
 		deployIPAM:           o.DeployIPAM,
 		deployBatches:        o.DeployBatches,
 		deployRuns:           newDeployRuns(log),
+		imagePrepares:        newImagePrepares(),
 		containerBatches:     o.ContainerBatches,
 		containerTagPolicy:   o.ContainerTagPolicy,
 		containerDefinitions: o.ContainerDefinitions,
@@ -637,6 +640,11 @@ func (h *Handler) Handler() http.Handler {
 	// Deploy profiles (ADR 0008 section 1, PV-04).
 	mux.HandleFunc("GET /deploy", h.handleDeployProfiles)
 	mux.HandleFunc("GET /deploy/images", h.handleDeployImages)
+	// Image preparation (PV-03h, D1a): proposed with the form, approved
+	// with the security key (schedules.js) or the CLI and a run.
+	mux.HandleFunc("POST /deploy/images/prepare", h.handleImagePrepare)
+	mux.HandleFunc("POST /deploy/images/approve", h.handleImagePrepareApprove)
+	mux.HandleFunc("POST /deploy/images/run", h.handleImagePrepareRun)
 	mux.HandleFunc("GET /deploy/new", h.handleDeployProfileEdit)
 	mux.HandleFunc("GET /deploy/{slug}", h.handleDeployProfile)
 	mux.HandleFunc("GET /deploy/{slug}/edit", h.handleDeployProfileEdit)

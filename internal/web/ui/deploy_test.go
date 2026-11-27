@@ -91,6 +91,13 @@ type fakeProvision struct {
 	// images and imagesErr answer ListPVEImages (deploy_images_test.go).
 	images    *pb.ListPVEImagesResponse
 	imagesErr error
+	// prepProposed and prepCommits record the image preparation RPCs;
+	// prepMutate changes the bound request, prepSHA the bound image's
+	// SHA-256 (deploy_images_test.go).
+	prepProposed []*pb.PVEImagePrepareSpec
+	prepCommits  []*pb.CommitPVEImagePrepareRequest
+	prepMutate   func(*canonical.Request)
+	prepSHA      string
 }
 
 func (f *fakeProvision) ProposePVEGuestProvision(_ context.Context, in *pb.ProposePVEGuestProvisionRequest, _ ...grpc.CallOption) (*pb.ProposePVEGuestProvisionResponse, error) {

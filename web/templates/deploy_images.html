@@ -66,4 +66,45 @@
   {{end}}
   {{end}}
 </section>
+{{if $d.CanPrepare}}
+<section class="panel" aria-label="Prepare a template">
+  <h2>Prepare a template</h2>
+  <p class="hint">Proposes <span class="mono">pve.image.prepare</span>: the executor downloads the catalog image, checks its SHA-256 and creates the template. The risk is HIGH: nothing runs before you approve the executor's bound request with your security key (or with <code>nebula approve</code> on the executor host in hardened mode).</p>
+  <form method="post" action="/deploy/images/prepare" class="inline-form" data-fetch>
+    <label>Remote <input name="remote" required maxlength="128" autocomplete="off"></label>
+    <label>Node <input name="node" required maxlength="128" autocomplete="off"></label>
+    <label>Template storage <input name="storage" required maxlength="64" value="local-lvm" autocomplete="off"></label>
+    <label>Import storage <input name="import_storage" required maxlength="64" value="local" autocomplete="off"></label>
+    <label>Image <select name="image" required>{{range $d.View.Images}}<option value="{{.ID}}">{{.ID}} ({{.OS}} {{.Release}}, {{.Arch}})</option>{{end}}</select></label>
+    <label>Template VMID <input name="vmid" required inputmode="numeric" pattern="[0-9]{3,9}" autocomplete="off"></label>
+    <button type="submit" class="button">Propose preparation</button>
+  </form>
+</section>
+{{end}}
+{{if $d.Prepares}}
+<section class="panel" aria-label="Your preparations">
+  <h2>Your preparations</h2>
+  {{range $d.Prepares}}
+  <article class="card" data-prepare="{{.ID}}">
+    <p><strong>{{.Spec.ImageId}}</strong> → VMID {{.Spec.Vmid}} on {{.Spec.RemoteId}} / {{.Spec.Node}}, storage {{.Spec.Storage}} (import {{.Spec.ImportStorage}}) · state <span class="prepare-state">{{.State}}</span> · risk {{.Risk}}</p>
+    <p class="hint">Catalog SHA-256 <span class="mono">{{.ImageSHA256}}</span>, execution digest <span class="mono">{{.Digest}}</span></p>
+    {{if .Mismatch}}
+    <div class="status status--error" role="alert"><p>The executor's binding differs from the request; it cannot be approved here:</p>
+      <ul>{{range .Mismatch}}<li>{{.}}</li>{{end}}</ul></div>
+    {{end}}
+    <details><summary>Bound request ({{.Bound.ActionID}})</summary><pre class="mono">{{.Bound.Canonical}}</pre></details>
+    {{if .Message}}<p class="message">{{.Message}}</p>{{end}}
+    {{if .Approvable}}
+    <button type="button" class="button schedule-approve" data-id="{{.ID}}" data-options="{{.Options}}" data-commit="/deploy/images/approve">Approve preparation of {{.Spec.ImageId}} as VMID {{.Spec.Vmid}} with security key</button>
+    {{else if .Runnable}}
+    <form method="post" action="/deploy/images/run" class="inline-form" data-fetch>
+      <input type="hidden" name="id" value="{{.ID}}">
+      <button type="submit" class="button">Run (after nebula approve {{.Digest}})</button>
+    </form>
+    {{end}}
+    {{with .Record}}<p>Template record: VMID {{.VMID}}, generation {{.Generation}}, source SHA-256 <span class="mono">{{.SourceSHA256}}</span>, execution <span class="mono">{{.ExecutionID}}</span>.</p>{{end}}
+  </article>
+  {{end}}
+</section>
+{{end}}
 {{end}}
