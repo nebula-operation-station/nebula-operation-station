@@ -5,12 +5,17 @@ GOBIN         ?= $(shell $(GO) env GOPATH)/bin
 # staticcheck 2026.2.1 cannot read Go 1.27 export data yet.
 LINT_TOOLCHAIN ?= go1.26.9
 STATICCHECK_VERSION ?= v0.8.1
-# cmd/nebula-server is the largest test binary. Under load it ran past the
-# shared 40m per-binary timeout of `make test` although it passes alone
-# (Wächter, 2026-11-26), so it runs in its own go test call with this timeout.
+# Slow test binaries run in their own go test call with SERVER_TEST_TIMEOUT
+# instead of the shared 40m per-binary timeout of `make test`:
+# - cmd/nebula-server, the largest test binary, ran past 40m under load
+#   although it passes alone (Wächter, 2026-11-26, fc06).
+# - internal/executions takes about 2400 s under -race on the shared host; one
+#   run was killed at 2400.113 s, the same package alone passed in 2397 s
+#   (fi05f, 2026-11-26, fc06b).
 # Override without editing: make test SERVER_TEST_TIMEOUT=120m
+# (SLOW_TEST_PKGS was SERVER_TEST_PKGS, which held only cmd/nebula-server.)
 SERVER_TEST_TIMEOUT ?= 90m
-SERVER_TEST_PKGS    := ./cmd/nebula-server/...
+SLOW_TEST_PKGS      := ./cmd/nebula-server/... ./internal/executions/...
 VERSION       ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT        ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 LDFLAGS       := -s -w \
@@ -28,18 +33,22 @@ build:
 # detector they use 2 contending writers, without it 4 (race_off_test.go), so
 # the 4-writer starvation checks run in CI too (vs02f, review of PR #791).
 #
-# All packages are tested: first every package except SERVER_TEST_PKGS, then
-# SERVER_TEST_PKGS with SERVER_TEST_TIMEOUT (see the variable at the top).
+# All packages are tested exactly once: first every package except
+# SLOW_TEST_PKGS with 40m, then SLOW_TEST_PKGS with SERVER_TEST_TIMEOUT (see
+# the variables at the top). The guards stop the run if a slow pattern
+# matches no package (so a renamed package cannot drop out silently), if a
+# slow package lies outside ./... or if no other packages are left.
 # The lists are computed only when this target runs (recursive =).
 TEST_ALL_PKGS    = $(shell $(GO) list ./...)
-TEST_SERVER_PKGS = $(shell $(GO) list $(SERVER_TEST_PKGS))
-TEST_OTHER_PKGS  = $(filter-out $(TEST_SERVER_PKGS),$(TEST_ALL_PKGS))
+TEST_SLOW_PKGS   = $(shell $(GO) list $(SLOW_TEST_PKGS))
+TEST_OTHER_PKGS  = $(filter-out $(TEST_SLOW_PKGS),$(TEST_ALL_PKGS))
 
 test:
-	$(if $(TEST_SERVER_PKGS),,$(error test: go list $(SERVER_TEST_PKGS) found no packages))
+	$(foreach p,$(SLOW_TEST_PKGS),$(if $(shell $(GO) list $(p) 2>/dev/null),,$(error test: go list $(p) found no packages)))
+	$(if $(filter-out $(TEST_ALL_PKGS),$(TEST_SLOW_PKGS)),$(error test: slow packages outside ./...: $(filter-out $(TEST_ALL_PKGS),$(TEST_SLOW_PKGS))))
 	$(if $(TEST_OTHER_PKGS),,$(error test: go list ./... found no other packages))
 	$(GO) test -race -timeout 40m $(TEST_OTHER_PKGS)
-	$(GO) test -race -timeout $(SERVER_TEST_TIMEOUT) $(SERVER_TEST_PKGS)
+	$(GO) test -race -timeout $(SERVER_TEST_TIMEOUT) $(TEST_SLOW_PKGS)
 	$(GO) test -count=1 -timeout 20m -run 'TestCompleteDropsSupersededHolds|TestConcurrentWriter' ./internal/vulnstore/
 
 # Deployment policy tests for the systemd units and nftables files, the
