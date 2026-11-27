@@ -90,6 +90,9 @@ type ReadGrantRequest struct {
 	ScopeValue string // tag "key=value" or environment name
 	Actions    []string
 	Days       int // ReadGrantShortDays or ReadGrantLongDays
+	// FimScanMode is the mode of fim.scan ("incremental" or "full") when
+	// Actions has permit.FimScanActionID; empty otherwise.
+	FimScanMode string
 }
 
 // ReadGrantPreviewTarget is one frozen target of a proposal.
@@ -174,11 +177,12 @@ type credentialVersioner interface {
 // the built-in actions of the approved ordinary read-only contract that
 // are read-only and take no parameters (their parameters hash is that of
 // "{}"; parameterized reads need their exact parameters bound, which the
-// page does not offer).
+// page does not offer). fim.scan is leaseable (leaseableAction) but is not
+// listed: it needs a mode, and the page has no mode choice yet.
 func ReadGrantActionIDs() []string {
 	var out []string
 	for _, id := range permit.ReadOnlyAllowlist {
-		if leaseableAction(id) {
+		if id != permit.FimScanActionID && leaseableAction(id) {
 			out = append(out, id)
 		}
 	}
@@ -187,12 +191,21 @@ func ReadGrantActionIDs() []string {
 }
 
 // leaseableAction reports whether actionID can be part of a proposed lease.
+// The one exception is fim.scan: a durable action with its two parameters
+// (mode, profile), bound through the hash of its mode. Every other action is
+// read-only, not durable and without parameters.
 func leaseableAction(id string) bool {
 	if !permit.InReadOnlyAllowlist(id) || schedgrant.IsTelemetryAction(id) {
 		return false
 	}
 	a, ok := actions.Lookup(id)
-	return ok && a.ReadOnly && !a.Durable && len(a.Params) == 0
+	if !ok || !a.ReadOnly {
+		return false
+	}
+	if id == permit.FimScanActionID {
+		return a.Durable && len(a.Params) == 2
+	}
+	return !a.Durable && len(a.Params) == 0
 }
 
 // credentialRefRe is permit's credential reference form (unexported there).
@@ -241,6 +254,11 @@ func checkReadGrantRequest(in ReadGrantRequest) error {
 	for _, a := range in.Actions {
 		if seen[a] || !leaseableAction(a) {
 			return &ReadGrantInputError{"an action is unknown, listed twice or not a read-only action"}
+		}
+		if a == permit.FimScanActionID {
+			if _, _, ok := fimScanModeParams(in.FimScanMode); !ok {
+				return &ReadGrantInputError{"fim.scan needs a mode, incremental or full"}
+			}
 		}
 		seen[a] = true
 	}
@@ -315,7 +333,16 @@ func (s *Service) ProposeReadGrant(ctx context.Context, user string, in ReadGran
 	}
 	for _, id := range in.Actions {
 		a, _ := actions.Lookup(id) // checked by checkReadGrantRequest
-		doc.Actions = append(doc.Actions, permit.ReadGrantAction{ActionID: a.ID, ModuleVersion: a.Version, ArtifactSHA256: a.SHA256(), ParametersHash: empty})
+		h := empty
+		if a.ID == permit.FimScanActionID {
+			// The grant binds the canonical parameters of the chosen mode.
+			_, mh, ok := fimScanModeParams(in.FimScanMode) // checked by checkReadGrantRequest
+			if !ok {
+				return ReadGrantPreview{}, &ReadGrantInputError{"fim.scan needs a mode, incremental or full"}
+			}
+			h = mh
+		}
+		doc.Actions = append(doc.Actions, permit.ReadGrantAction{ActionID: a.ID, ModuleVersion: a.Version, ArtifactSHA256: a.SHA256(), ParametersHash: h})
 	}
 	var excluded []ReadGrantExcluded
 	versions := map[string]string{}
