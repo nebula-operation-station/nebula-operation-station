@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -109,10 +110,62 @@ type PveImageCatalog struct {
 	// rollback check holds across executor restarts. It is required:
 	// without it no signed catalog is loaded.
 	State PveCatalogStateStore
+	// Local durably holds the local entries (pve-catalog-local.json). With
+	// it, AddLocal and RemoveLocal persist every change before it becomes
+	// current, and the entries are loaded on first use (or LoadLocal); an
+	// unreadable store serves no local entry and refuses every change
+	// (ErrPveLocalImageStore). Without it the local entries live in memory
+	// only.
+	Local PveLocalImageStore
 
-	mu     sync.Mutex
-	signed *release.Catalog
-	local  map[string]release.Image
+	mu          sync.Mutex
+	signed      *release.Catalog
+	local       map[string]release.Image
+	localLoaded bool
+}
+
+// LoadLocal loads the persisted local entries, if not done yet. It fails
+// with ErrPveLocalImageStore when they cannot be read; a later call tries
+// again.
+func (c *PveImageCatalog) LoadLocal() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.loadLocalLocked()
+}
+
+func (c *PveImageCatalog) loadLocalLocked() error {
+	if c.Local == nil || c.localLoaded {
+		return nil
+	}
+	imgs, err := c.Local.PveLocalImages()
+	if err != nil {
+		return fmt.Errorf("load local images: %w: %w", ErrPveLocalImageStore, err)
+	}
+	m := make(map[string]release.Image, len(imgs))
+	for _, img := range imgs {
+		m[img.ID] = img
+	}
+	c.local, c.localLoaded = m, true
+	return nil
+}
+
+// commitLocalLocked persists next (when there is a store) and then makes it
+// current; on a write failure the current entries stay.
+func (c *PveImageCatalog) commitLocalLocked(next map[string]release.Image) error {
+	if c.Local != nil {
+		list := make([]release.Image, 0, len(next))
+		for _, img := range next {
+			list = append(list, img)
+		}
+		if err := c.Local.PutPveLocalImages(list); err != nil {
+			if errors.Is(err, ErrPveLocalImageLimit) {
+				return err
+			}
+			return fmt.Errorf("%w: %w", ErrPveLocalImageStore, err)
+		}
+	}
+	c.local = next
+	return nil
 }
 
 // LoadSigned verifies a signed catalog with the active release roots of
@@ -153,34 +206,103 @@ func (c *PveImageCatalog) LoadSigned(roots []release.Root, raw, sig []byte) erro
 }
 
 // AddLocal adds or replaces an operator-defined entry. Its ID must start
-// with release.LocalImagePrefix; it carries trust "Local".
+// with release.LocalImagePrefix; it carries trust "Local". The entry is
+// persisted (Local) before it becomes current. An invalid entry wraps
+// ErrPveLocalImageInvalid and release.ErrFormat; more than
+// maxPveLocalImages entries ErrPveLocalImageLimit; a store failure
+// ErrPveLocalImageStore.
 func (c *PveImageCatalog) AddLocal(img release.Image) error {
+	_, err := c.addLocal(img)
+	return err
+}
+
+// addLocal is AddLocal and reports whether an entry was replaced.
+func (c *PveImageCatalog) addLocal(img release.Image) (bool, error) {
 	if err := release.ValidateImage(img, true); err != nil {
-		return fmt.Errorf("add local image: %w", err)
+		return false, fmt.Errorf("add local image: %w: %w", ErrPveLocalImageInvalid, err)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.local == nil {
-		c.local = make(map[string]release.Image)
+	if err := c.loadLocalLocked(); err != nil {
+		return false, fmt.Errorf("add local image: %w", err)
 	}
-	c.local[img.ID] = img
-	return nil
+	_, replaced := c.local[img.ID]
+	if !replaced && len(c.local) >= maxPveLocalImages {
+		return false, fmt.Errorf("add local image: %w", ErrPveLocalImageLimit)
+	}
+	next := make(map[string]release.Image, len(c.local)+1)
+	for k, v := range c.local {
+		next[k] = v
+	}
+	next[img.ID] = img
+	if err := c.commitLocalLocked(next); err != nil {
+		return false, fmt.Errorf("add local image: %w", err)
+	}
+	return replaced, nil
 }
 
-// RemoveLocal removes a local entry and reports whether it existed.
-func (c *PveImageCatalog) RemoveLocal(id string) bool {
+// RemoveLocal removes a local entry and reports whether it existed. The
+// removal is persisted (Local) before the entry stops being served; a
+// store failure wraps ErrPveLocalImageStore and changes nothing.
+func (c *PveImageCatalog) RemoveLocal(id string) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	_, ok := c.local[id]
-	delete(c.local, id)
-	return ok
+	if err := c.loadLocalLocked(); err != nil {
+		return false, fmt.Errorf("remove local image: %w", err)
+	}
+	if _, ok := c.local[id]; !ok {
+		return false, nil
+	}
+	next := make(map[string]release.Image, len(c.local))
+	for k, v := range c.local {
+		if k != id {
+			next[k] = v
+		}
+	}
+	if err := c.commitLocalLocked(next); err != nil {
+		return false, fmt.Errorf("remove local image: %w", err)
+	}
+	return true, nil
 }
 
-// Lookup resolves an image ID. Signed and local IDs never overlap.
+// CatalogListing returns the signed catalog's identity and entries and the
+// local entries, each sorted by ID. It fails with ErrPveLocalImageStore
+// when the local entries cannot be read, rather than listing without them.
+// (Not named List: the netdev read-path guard in test/security resolves
+// calls by method name, and the read path calls vault List.)
+func (c *PveImageCatalog) CatalogListing() (PveCatalogListing, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.loadLocalLocked(); err != nil {
+		return PveCatalogListing{}, err
+	}
+	var l PveCatalogListing
+	if c.signed != nil {
+		l.Sequence, l.Digest = c.signed.Sequence, c.signed.Digest
+		for _, img := range c.signed.Images {
+			l.Images = append(l.Images, PveImage{Image: img, Trust: ImageTrustSigned, CatalogSequence: c.signed.Sequence, CatalogDigest: c.signed.Digest})
+		}
+	}
+	ids := make([]string, 0, len(c.local))
+	for id := range c.local {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	for _, id := range ids {
+		l.Images = append(l.Images, PveImage{Image: c.local[id], Trust: ImageTrustLocal})
+	}
+	return l, nil
+}
+
+// Lookup resolves an image ID. Signed and local IDs never overlap. While
+// the local entries cannot be read, no local ID resolves.
 func (c *PveImageCatalog) Lookup(id string) (PveImage, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if strings.HasPrefix(id, release.LocalImagePrefix) {
+		if c.loadLocalLocked() != nil {
+			return PveImage{}, false
+		}
 		img, ok := c.local[id]
 		return PveImage{Image: img, Trust: ImageTrustLocal}, ok
 	}
