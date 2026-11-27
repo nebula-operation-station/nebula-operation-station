@@ -44,6 +44,13 @@ const (
 	pveMutationMaxTaskPages = 10
 	// pveMutationMaxStatusLen bounds a reported power or QMP status.
 	pveMutationMaxStatusLen = 32
+	// pveTemplateGoneMaxMessage bounds the PVE error message of a 500 reply
+	// to a template read that is compared with the "does not exist" form
+	// (ADR 0008 D5). A longer message is never "template gone".
+	pveTemplateGoneMaxMessage = 512
+	// pveTemplateGoneMaxBody bounds the body of a 500 reply to a template
+	// read; a longer body is never "template gone".
+	pveTemplateGoneMaxBody = 4 << 10
 )
 
 // pveNodeTargetDigestDomain separates the node target digest from every
@@ -459,18 +466,10 @@ func pveTargetState(ctx context.Context, hc *http.Client, base string, read pvea
 	if err := pveGetData(ctx, hc, base, read, guest+"/config", nil, &cfg); err != nil {
 		return PveTargetState{}, err
 	}
-	if len(cfg) == 0 || len(cfg) > pveMutationMaxConfigKeys {
-		return PveTargetState{}, errPveMutationRead
-	}
-	var generation string
-	if raw, ok := cfg["digest"]; !ok || json.Unmarshal(raw, &generation) != nil || !pveGenerationRe.MatchString(generation) {
-		return PveTargetState{}, errPveMutationRead
-	}
-	canon, err := json.Marshal(cfg) // map members are marshalled in sorted order
+	digest, generation, err := pveGuestConfigDigest(cfg)
 	if err != nil {
-		return PveTargetState{}, errPveMutationRead
+		return PveTargetState{}, err
 	}
-	sum := sha256.Sum256(canon)
 	var st struct {
 		VMID      json.RawMessage `json:"vmid"`
 		Status    string          `json:"status"`
@@ -484,7 +483,7 @@ func pveTargetState(ctx context.Context, hc *http.Client, base string, read pvea
 	if (string(st.VMID) != want && string(st.VMID) != `"`+want+`"`) || !validPveStatus(st.Status) {
 		return PveTargetState{}, errPveMutationRead
 	}
-	live := PveTargetState{Node: node, Kind: kind, ConfigDigest: hex.EncodeToString(sum[:]), Generation: generation, Status: st.Status}
+	live := PveTargetState{Node: node, Kind: kind, ConfigDigest: digest, Generation: generation, Status: st.Status}
 	if kind == permit.ProviderKindQemu {
 		if st.QMPStatus != "" && !validPveStatus(st.QMPStatus) {
 			return PveTargetState{}, errPveMutationRead
@@ -493,6 +492,113 @@ func pveTargetState(ctx context.Context, hc *http.Client, base string, read pvea
 		live.QMPStatus = st.QMPStatus
 	}
 	return live, nil
+}
+
+// pveGuestConfigDigest checks a guest config read from the remote and
+// returns the hex SHA-256 of its complete configuration (members in sorted
+// order) and PVE's own config digest (the guest generation).
+func pveGuestConfigDigest(cfg map[string]json.RawMessage) (string, string, error) {
+	if len(cfg) == 0 || len(cfg) > pveMutationMaxConfigKeys {
+		return "", "", errPveMutationRead
+	}
+	var generation string
+	if raw, ok := cfg["digest"]; !ok || json.Unmarshal(raw, &generation) != nil || !pveGenerationRe.MatchString(generation) {
+		return "", "", errPveMutationRead
+	}
+	canon, err := json.Marshal(cfg) // map members are marshalled in sorted order
+	if err != nil {
+		return "", "", errPveMutationRead
+	}
+	sum := sha256.Sum256(canon)
+	return hex.EncodeToString(sum[:]), generation, nil
+}
+
+// TemplateConfig implements PveTemplateReader with the read token: one GET
+// of the template's config on node (QEMU). Found false means the remote
+// answered that the config does not exist ("template gone", ADR 0008 D5):
+// HTTP 404, or HTTP 500 whose error message is exactly
+// pveTemplateGoneMessage of this node and VMID. ConfigDigest is computed
+// as in TargetState, so it compares with a record written from either.
+// Every other answer (transport error, timeout, any other status, a 500
+// with any other message, a malformed or oversize body) is a read error.
+func (c *pveMutationClient) TemplateConfig(ctx context.Context, rm executordb.PveRemote, node string, vmid uint64, read pveapi.TokenSupplier) (PveTemplateConfig, error) {
+	if err := permit.ValidateProviderMutationShape(permit.ProviderKindQemu, node, vmid); err != nil || vmid == 0 || read == nil {
+		return PveTemplateConfig{}, ErrPveMutationRequest
+	}
+	hc, watch, base, err := c.conn(ctx, rm)
+	if err != nil {
+		return PveTemplateConfig{}, err
+	}
+	tc, err := pveTemplateConfig(ctx, hc, base, read, node, vmid)
+	if err = c.checkTrust(rm, watch, err); err != nil {
+		return PveTemplateConfig{}, err
+	}
+	return tc, nil
+}
+
+// pveTemplateConfig reads one validated template config.
+func pveTemplateConfig(ctx context.Context, hc *http.Client, base string, read pveapi.TokenSupplier, node string, vmid uint64) (PveTemplateConfig, error) {
+	path := "/nodes/" + url.PathEscape(node) + "/" + permit.ProviderKindQemu + "/" + strconv.FormatUint(vmid, 10) + "/config"
+	var cfg map[string]json.RawMessage
+	found, err := pveGetWith(ctx, hc, base, read, path, nil, pveTemplateGone(node, vmid), &cfg)
+	if err != nil {
+		return PveTemplateConfig{}, err
+	}
+	if !found {
+		return PveTemplateConfig{Node: node}, nil
+	}
+	digest, _, err := pveGuestConfigDigest(cfg)
+	if err != nil {
+		return PveTemplateConfig{}, err
+	}
+	return PveTemplateConfig{Found: true, Node: node, ConfigDigest: digest}, nil
+}
+
+// pveTemplateGoneMessage is the PVE error message for a missing QEMU guest
+// config, built by NOS from the node and VMID of the request and never
+// taken from a reply (ADR 0008 D5, "Exact form"; message measured in the
+// lab 2026-11-25).
+func pveTemplateGoneMessage(node string, vmid uint64) string {
+	return "Configuration file 'nodes/" + node + "/qemu-server/" + strconv.FormatUint(vmid, 10) + ".conf' does not exist"
+}
+
+// pveTemplateGone reports whether a non-200 reply to the template read of
+// node and vmid says the config does not exist: HTTP 404, or HTTP 500 with
+// pveTemplateGoneMessage. The lab check did not record where PVE puts the
+// message (ADR 0008 D5, open for PV-03a), so both places PVE uses are
+// accepted: the reason phrase of the status line (its JSON formatter) and
+// the "message" member of a JSON body (at most pveTemplateGoneMaxBody
+// bytes). Either must equal the message byte for byte after trimming
+// leading and trailing whitespace; nothing else counts.
+func pveTemplateGone(node string, vmid uint64) func(*http.Response) bool {
+	want := pveTemplateGoneMessage(node, vmid)
+	return func(resp *http.Response) bool {
+		switch resp.StatusCode {
+		case http.StatusNotFound:
+			return true
+		case http.StatusInternalServerError:
+		default:
+			return false
+		}
+		if reason, ok := strings.CutPrefix(resp.Status, "500 "); ok && pveGoneMessageIs(reason, want) {
+			return true
+		}
+		raw, err := io.ReadAll(io.LimitReader(resp.Body, pveTemplateGoneMaxBody+1))
+		if err != nil || len(raw) > pveTemplateGoneMaxBody || !utf8.Valid(raw) {
+			return false
+		}
+		var body struct {
+			Message *string `json:"message"`
+		}
+		if json.Unmarshal(raw, &body) != nil || body.Message == nil {
+			return false
+		}
+		return pveGoneMessageIs(*body.Message, want)
+	}
+}
+
+func pveGoneMessageIs(msg, want string) bool {
+	return len(msg) <= pveTemplateGoneMaxMessage && utf8.ValidString(msg) && strings.TrimSpace(msg) == want
 }
 
 func validPveStatus(s string) bool {
@@ -541,6 +647,17 @@ func pveGetOptionalData(ctx context.Context, hc *http.Client, base string, read 
 }
 
 func pveGet(ctx context.Context, hc *http.Client, base string, read pveapi.TokenSupplier, path string, q url.Values, optional bool, out any) (bool, error) {
+	var gone func(*http.Response) bool
+	if optional {
+		gone = func(resp *http.Response) bool { return resp.StatusCode == http.StatusNotFound }
+	}
+	return pveGetWith(ctx, hc, base, read, path, q, gone, out)
+}
+
+// pveGetWith is pveGet where gone, if set, decides for a non-200 reply
+// whether it reports found false (and decodes nothing); every other
+// non-200 reply is a read error.
+func pveGetWith(ctx context.Context, hc *http.Client, base string, read pveapi.TokenSupplier, path string, q url.Values, gone func(*http.Response) bool, out any) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, pveMutationRequestTimeout)
 	defer cancel()
 	u := base + "/api2/json" + path
@@ -565,8 +682,11 @@ func pveGet(ctx context.Context, hc *http.Client, base string, read pveapi.Token
 		return false, errPveMutationRead
 	}
 	defer resp.Body.Close()
-	if optional && resp.StatusCode == http.StatusNotFound {
-		return false, nil
+	if resp.StatusCode != http.StatusOK {
+		if gone != nil && gone(resp) {
+			return false, nil
+		}
+		return false, errPveMutationRead
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, pveMutationMaxReadBytes+1))
 	if err != nil || resp.StatusCode != http.StatusOK || len(raw) > pveMutationMaxReadBytes || !utf8.Valid(raw) {

@@ -295,6 +295,9 @@ const (
 	pveTemplatesFile    = "pve-templates.json"
 	pveVMIDsFile        = "pve-vmids.json"
 	pveCatalogStateFile = "pve-catalog.json"
+	// pveCatalogLocalFile holds the local image entries (D3 (a)); only
+	// AddPVELocalImage and RemovePVELocalImage write it.
+	pveCatalogLocalFile = "pve-catalog-local.json"
 )
 
 // PveGuestProvisionRunBound bounds one CommitPVEGuestProvision: every step
@@ -334,16 +337,24 @@ var (
 
 // newPveProvisioner builds the executor's one provisioner on m, with its
 // state in the data directory: template records, VMID reservations and the
-// image catalog rollback state. The NOS automation key is the public key
-// of the keyring credential a request names; the reader uses the read
-// token over the remote's pinned transport (pveProvisionReaderAPI). It
-// returns nil when the executor has no data directory.
+// image catalog rollback state and local entries. The local entries are
+// loaded here; if they cannot be read, the failure is logged, no local
+// entry is served and the catalog tries again on its next use. The NOS
+// automation key is the public key of the keyring credential a request
+// names; the reader uses the read token over the remote's pinned transport
+// (pveProvisionReaderAPI). It returns nil when the executor has no data
+// directory.
 func (s *Service) newPveProvisioner(m *PveMutations) *PveProvisioner {
 	if s.dataDir == "" {
 		return nil
 	}
+	cat := &PveImageCatalog{State: &FilePveCatalogState{Path: filepath.Join(s.dataDir, pveCatalogStateFile)},
+		Local: &FilePveLocalImages{Path: filepath.Join(s.dataDir, pveCatalogLocalFile)}}
+	if err := cat.LoadLocal(); err != nil {
+		s.log.Error("pve local image entries unavailable; no local entry is served", "err", err)
+	}
 	imgs := &PveImages{Mutations: m,
-		Catalog:   &PveImageCatalog{State: &FilePveCatalogState{Path: filepath.Join(s.dataDir, pveCatalogStateFile)}},
+		Catalog:   cat,
 		Templates: &FilePveTemplateStore{Path: filepath.Join(s.dataDir, pveTemplatesFile)},
 		Artifact:  pveImagePrepareArtifact, ModuleVersion: pveImagePrepareVersion}
 	return &PveProvisioner{Mutations: m, Images: imgs, Reader: pveProvisionReaderAPI{agent: pveGuestAgentAPI{s: s}},

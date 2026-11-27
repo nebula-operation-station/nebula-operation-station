@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -89,7 +90,37 @@ var (
 	// ErrPveTemplateStore is returned when the template record could not
 	// be read or written.
 	ErrPveTemplateStore = errors.New("executor: template record unavailable")
+	// ErrPveTemplateUnreadable is returned when the live template could not
+	// be read (no read token, transport error, timeout, an unexpected
+	// status, a malformed or oversize reply). It is neither "gone" nor
+	// "changed": the binding and a re-preparation proposal are refused
+	// (ADR 0008 D5).
+	ErrPveTemplateUnreadable = errors.New("executor: prepared template could not be read; refused")
 )
+
+// PveTemplateReader may be implemented by a PveMutationClient; the
+// template check of pve.image.prepare and provisioning needs it. A client
+// without it reads no template, so every binding fails closed with
+// ErrPveTemplateUnreadable.
+type PveTemplateReader interface {
+	// TemplateConfig reads the config of the QEMU template vmid on node
+	// with the read token. Found false (nil error) means the remote
+	// answered that the config does not exist; any failed or invalid read
+	// is an error.
+	TemplateConfig(ctx context.Context, rm executordb.PveRemote, node string, vmid uint64, read pveapi.TokenSupplier) (PveTemplateConfig, error)
+}
+
+// PveTemplateConfig is the result of one template read (untrusted; the
+// caller validates every member).
+type PveTemplateConfig struct {
+	// Found is false when the remote reports the config does not exist.
+	Found bool
+	// Node is the node the config was read on.
+	Node string
+	// ConfigDigest is the hex SHA-256 of the complete configuration, as in
+	// PveTargetState; empty when not found.
+	ConfigDigest string
+}
 
 // PveImage is one resolved catalog entry and its provenance.
 type PveImage struct {
@@ -109,10 +140,62 @@ type PveImageCatalog struct {
 	// rollback check holds across executor restarts. It is required:
 	// without it no signed catalog is loaded.
 	State PveCatalogStateStore
+	// Local durably holds the local entries (pve-catalog-local.json). With
+	// it, AddLocal and RemoveLocal persist every change before it becomes
+	// current, and the entries are loaded on first use (or LoadLocal); an
+	// unreadable store serves no local entry and refuses every change
+	// (ErrPveLocalImageStore). Without it the local entries live in memory
+	// only.
+	Local PveLocalImageStore
 
-	mu     sync.Mutex
-	signed *release.Catalog
-	local  map[string]release.Image
+	mu          sync.Mutex
+	signed      *release.Catalog
+	local       map[string]release.Image
+	localLoaded bool
+}
+
+// LoadLocal loads the persisted local entries, if not done yet. It fails
+// with ErrPveLocalImageStore when they cannot be read; a later call tries
+// again.
+func (c *PveImageCatalog) LoadLocal() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.loadLocalLocked()
+}
+
+func (c *PveImageCatalog) loadLocalLocked() error {
+	if c.Local == nil || c.localLoaded {
+		return nil
+	}
+	imgs, err := c.Local.PveLocalImages()
+	if err != nil {
+		return fmt.Errorf("load local images: %w: %w", ErrPveLocalImageStore, err)
+	}
+	m := make(map[string]release.Image, len(imgs))
+	for _, img := range imgs {
+		m[img.ID] = img
+	}
+	c.local, c.localLoaded = m, true
+	return nil
+}
+
+// commitLocalLocked persists next (when there is a store) and then makes it
+// current; on a write failure the current entries stay.
+func (c *PveImageCatalog) commitLocalLocked(next map[string]release.Image) error {
+	if c.Local != nil {
+		list := make([]release.Image, 0, len(next))
+		for _, img := range next {
+			list = append(list, img)
+		}
+		if err := c.Local.PutPveLocalImages(list); err != nil {
+			if errors.Is(err, ErrPveLocalImageLimit) {
+				return err
+			}
+			return fmt.Errorf("%w: %w", ErrPveLocalImageStore, err)
+		}
+	}
+	c.local = next
+	return nil
 }
 
 // LoadSigned verifies a signed catalog with the active release roots of
@@ -153,34 +236,103 @@ func (c *PveImageCatalog) LoadSigned(roots []release.Root, raw, sig []byte) erro
 }
 
 // AddLocal adds or replaces an operator-defined entry. Its ID must start
-// with release.LocalImagePrefix; it carries trust "Local".
+// with release.LocalImagePrefix; it carries trust "Local". The entry is
+// persisted (Local) before it becomes current. An invalid entry wraps
+// ErrPveLocalImageInvalid and release.ErrFormat; more than
+// maxPveLocalImages entries ErrPveLocalImageLimit; a store failure
+// ErrPveLocalImageStore.
 func (c *PveImageCatalog) AddLocal(img release.Image) error {
+	_, err := c.addLocal(img)
+	return err
+}
+
+// addLocal is AddLocal and reports whether an entry was replaced.
+func (c *PveImageCatalog) addLocal(img release.Image) (bool, error) {
 	if err := release.ValidateImage(img, true); err != nil {
-		return fmt.Errorf("add local image: %w", err)
+		return false, fmt.Errorf("add local image: %w: %w", ErrPveLocalImageInvalid, err)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.local == nil {
-		c.local = make(map[string]release.Image)
+	if err := c.loadLocalLocked(); err != nil {
+		return false, fmt.Errorf("add local image: %w", err)
 	}
-	c.local[img.ID] = img
-	return nil
+	_, replaced := c.local[img.ID]
+	if !replaced && len(c.local) >= maxPveLocalImages {
+		return false, fmt.Errorf("add local image: %w", ErrPveLocalImageLimit)
+	}
+	next := make(map[string]release.Image, len(c.local)+1)
+	for k, v := range c.local {
+		next[k] = v
+	}
+	next[img.ID] = img
+	if err := c.commitLocalLocked(next); err != nil {
+		return false, fmt.Errorf("add local image: %w", err)
+	}
+	return replaced, nil
 }
 
-// RemoveLocal removes a local entry and reports whether it existed.
-func (c *PveImageCatalog) RemoveLocal(id string) bool {
+// RemoveLocal removes a local entry and reports whether it existed. The
+// removal is persisted (Local) before the entry stops being served; a
+// store failure wraps ErrPveLocalImageStore and changes nothing.
+func (c *PveImageCatalog) RemoveLocal(id string) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	_, ok := c.local[id]
-	delete(c.local, id)
-	return ok
+	if err := c.loadLocalLocked(); err != nil {
+		return false, fmt.Errorf("remove local image: %w", err)
+	}
+	if _, ok := c.local[id]; !ok {
+		return false, nil
+	}
+	next := make(map[string]release.Image, len(c.local))
+	for k, v := range c.local {
+		if k != id {
+			next[k] = v
+		}
+	}
+	if err := c.commitLocalLocked(next); err != nil {
+		return false, fmt.Errorf("remove local image: %w", err)
+	}
+	return true, nil
 }
 
-// Lookup resolves an image ID. Signed and local IDs never overlap.
+// CatalogListing returns the signed catalog's identity and entries and the
+// local entries, each sorted by ID. It fails with ErrPveLocalImageStore
+// when the local entries cannot be read, rather than listing without them.
+// (Not named List: the netdev read-path guard in test/security resolves
+// calls by method name, and the read path calls vault List.)
+func (c *PveImageCatalog) CatalogListing() (PveCatalogListing, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.loadLocalLocked(); err != nil {
+		return PveCatalogListing{}, err
+	}
+	var l PveCatalogListing
+	if c.signed != nil {
+		l.Sequence, l.Digest = c.signed.Sequence, c.signed.Digest
+		for _, img := range c.signed.Images {
+			l.Images = append(l.Images, PveImage{Image: img, Trust: ImageTrustSigned, CatalogSequence: c.signed.Sequence, CatalogDigest: c.signed.Digest})
+		}
+	}
+	ids := make([]string, 0, len(c.local))
+	for id := range c.local {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	for _, id := range ids {
+		l.Images = append(l.Images, PveImage{Image: c.local[id], Trust: ImageTrustLocal})
+	}
+	return l, nil
+}
+
+// Lookup resolves an image ID. Signed and local IDs never overlap. While
+// the local entries cannot be read, no local ID resolves.
 func (c *PveImageCatalog) Lookup(id string) (PveImage, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if strings.HasPrefix(id, release.LocalImagePrefix) {
+		if c.loadLocalLocked() != nil {
+			return PveImage{}, false
+		}
 		img, ok := c.local[id]
 		return PveImage{Image: img, Trust: ImageTrustLocal}, ok
 	}
@@ -412,7 +564,14 @@ func (p *PveImages) mutation(req PveImagePrepareRequest) (PveMutationRequest, Pv
 
 // ProposalRequest builds the canonical request and parameters of a new
 // pve.image.prepare proposal. The risk is raised to ImagePrepareRisk. An
-// image whose template for the key is still valid is refused.
+// image whose template for the key is still valid is refused. When the
+// key has a record, a new proposal is built only when its binding failed
+// because the template is gone (ErrPveTemplateNotPrepared), changed
+// (ErrPveTemplateChanged) or the remote was re-pinned, blocked or removed
+// (ErrPveRemoteChanged; the mutation's own remote check then refuses a
+// blocked or removed remote). Any other failure, an unreadable template
+// above all, refuses with no proposal and leaves the record as it is
+// (ADR 0008 D5).
 func (p *PveImages) ProposalRequest(ctx context.Context, req PveImagePrepareRequest, executionID string, risk canonical.Risk, stagePlanHash string, expiry time.Time) (canonical.Request, []byte, error) {
 	if err := p.checkDeps(); err != nil {
 		return canonical.Request{}, nil, err
@@ -427,10 +586,17 @@ func (p *PveImages) ProposalRequest(ctx context.Context, req PveImagePrepareRequ
 	}
 	if ok {
 		_, err := p.BindTemplate(ctx, PveTemplateBinding{PveTemplateKey: rec.PveTemplateKey, VMID: rec.VMID, Generation: rec.Generation, SourceSHA256: rec.SourceSHA256})
-		if err == nil {
+		switch {
+		case err == nil:
 			return canonical.Request{}, nil, ErrPveImagePrepared
-		}
-		if errors.Is(err, ErrPveTemplateStore) || errors.Is(err, ErrPveJobStore) {
+		case errors.Is(err, ErrPveTemplateNotPrepared), errors.Is(err, ErrPveTemplateChanged), errors.Is(err, ErrPveRemoteChanged):
+			// Gone, changed or re-pinned: a new proposal with its own
+			// approval may replace the record.
+		default:
+			if errors.Is(err, ErrPveTemplateUnreadable) {
+				p.Mutations.log().Warn("audit", "kind", "pve_template_unreadable", "remote", rec.RemoteID, "node", rec.Node,
+					"image", rec.ImageID, "vmid", rec.VMID, "generation", rec.Generation)
+			}
 			return canonical.Request{}, nil, err
 		}
 	}
@@ -465,6 +631,11 @@ func (p *PveImages) Prepare(ctx context.Context, req PveImagePrepareRequest) (Pv
 	digest, err := p.liveTemplate(ctx, rm, req.Node, req.VMID)
 	if err != nil {
 		p.auditUnrecorded(req, res.ExecutionID, "template_unreadable")
+		if errors.Is(err, ErrPveTemplateNotPrepared) {
+			// The template was just built: "gone" here is a template that
+			// cannot be read back, never one that was not prepared.
+			return PveTemplateRecord{}, fmt.Errorf("read prepared template %d: gone after the run: %w", req.VMID, ErrPveTemplateUnreadable)
+		}
 		return PveTemplateRecord{}, err
 	}
 	rec := PveTemplateRecord{
@@ -495,14 +666,28 @@ func (p *PveImages) auditUnrecorded(req PveImagePrepareRequest, executionID, rea
 }
 
 // liveTemplate reads the template's live configuration digest with the
-// read token and checks that it is on node.
+// read token (PveTemplateReader) and checks that it is on node. A template
+// the remote reports as not existing is ErrPveTemplateNotPrepared; one on
+// another node, or with an invalid digest, is ErrPveTemplateChanged; a
+// failed read is ErrPveTemplateUnreadable, which wraps no other error, so
+// it never matches the fall-through of ProposalRequest.
 func (p *PveImages) liveTemplate(ctx context.Context, rm executordb.PveRemote, node string, vmid uint64) (string, error) {
+	tr, ok := p.Mutations.Client.(PveTemplateReader)
+	if !ok {
+		return "", fmt.Errorf("read template %d: %w", vmid, ErrPveTemplateUnreadable)
+	}
 	read, err := p.Mutations.readToken(rm)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("read template %d: no read token: %w", vmid, ErrPveTemplateUnreadable)
 	}
-	live, err := p.Mutations.Client.TargetState(ctx, rm, permit.ProviderKindQemu, node, vmid, read)
-	if err != nil || live.Node != node || !validHexDigest(live.ConfigDigest) {
+	live, err := tr.TemplateConfig(ctx, rm, node, vmid, read)
+	if err != nil {
+		return "", fmt.Errorf("read template %d: %w", vmid, ErrPveTemplateUnreadable)
+	}
+	if !live.Found {
+		return "", ErrPveTemplateNotPrepared
+	}
+	if live.Node != node || !validHexDigest(live.ConfigDigest) {
 		return "", ErrPveTemplateChanged
 	}
 	return live.ConfigDigest, nil
@@ -526,7 +711,9 @@ func validHexDigest(s string) bool {
 // the preparation and that the live template configuration equals the
 // recorded one. Any difference (a template changed, moved or removed
 // outside NOS, a re-preparation, a withdrawn catalog entry, a re-pinned
-// remote) fails the binding.
+// remote) fails the binding: a template the remote reports as not existing
+// with ErrPveTemplateNotPrepared, a template that cannot be read with
+// ErrPveTemplateUnreadable.
 func (p *PveImages) BindTemplate(ctx context.Context, b PveTemplateBinding) (PveTemplateRecord, error) {
 	if err := p.checkDeps(); err != nil {
 		return PveTemplateRecord{}, err

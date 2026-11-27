@@ -20,6 +20,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/fimscan"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
@@ -44,6 +45,12 @@ const leaseRunRequirement = "read lease"
 // leaseBudgetWindow is the rolling window of a lease's run budget.
 const leaseBudgetWindow = time.Hour
 
+// durableReadCallTimeout bounds the call that starts a durable read (fim.scan).
+// The executor answers once the job is stored and started, within its own
+// 30 s dispatch bound. The job runs on the host after the call and the
+// executor collects it, so the runner does not wait for the job's 40 min.
+const durableReadCallTimeout = 2 * time.Minute
+
 // readGrantRunner is the executor API the lease runner needs. Like
 // readGrantExecutor it is asserted, not part of Executor: an executor
 // without it runs legacy schedules only.
@@ -64,10 +71,13 @@ type ordinaryLease struct {
 }
 
 // leaseAction is one action of an ordinary lease with the parameters it runs
-// with: canonical JSON, "{}" for an action without parameters.
+// with: canonical JSON, "{}" for an action without parameters. hash is the
+// ParametersHash the grant binds the entry to; for fim.scan it names the mode,
+// which sets the entry's own due time (leaseActionFloor).
 type leaseAction struct {
 	action actions.Action
 	params []byte
+	hash   string
 }
 
 // boundParams is one stored parameter row of a read grant (read_grant_params):
@@ -113,14 +123,16 @@ func ordinaryLeases(grants []*pb.ReadGrant, now time.Time, stored map[string][]b
 		}
 		for _, da := range doc.Actions {
 			a, ok := actions.Lookup(da.ActionID)
-			if !ok || a.Version != da.ModuleVersion || a.SHA256() != da.ArtifactSHA256 || !a.ReadOnly || a.Durable {
+			// Durable is allowed for fim.scan alone (decision (g) option 2);
+			// every other durable action stays out.
+			if !ok || a.Version != da.ModuleVersion || a.SHA256() != da.ArtifactSHA256 || !a.ReadOnly || !durableLeaseOK(a) {
 				continue
 			}
 			params, ok := leaseActionParams(a, da, empty, stored[l.id])
 			if !ok || (da.ParametersHash != empty && slices.ContainsFunc(l.actions, func(x leaseAction) bool { return x.action.ID == a.ID })) {
 				continue
 			}
-			l.actions = append(l.actions, leaseAction{action: a, params: params})
+			l.actions = append(l.actions, leaseAction{action: a, params: params, hash: da.ParametersHash})
 		}
 		// The document may list the actions in any order; docker.inspect must
 		// run before image.packages, so that the latter can wait for it.
@@ -139,6 +151,15 @@ func ordinaryLeases(grants []*pb.ReadGrant, now time.Time, stored map[string][]b
 	return out
 }
 
+// durableLeaseOK reports whether a read lease may run a built-in action as far
+// as durability goes: fim.scan is durable (decision (g) option 2), every other
+// action is attached and not durable. A durable action other than fim.scan is
+// refused whatever its parameters. The grant allowlist (permit) also rejects
+// them, so this is the runner's own check, not the only one.
+func durableLeaseOK(a actions.Action) bool {
+	return a.Durable == (a.ID == permit.FimScanActionID)
+}
+
 // leaseActionParams returns the canonical parameters an action of an ordinary
 // lease runs with, and false when the action must be skipped. An action
 // without a parameters hash runs with "{}" and must have no parameters. An
@@ -146,9 +167,15 @@ func ordinaryLeases(grants []*pb.ReadGrant, now time.Time, stored map[string][]b
 // the document's ParametersHash and passes the action's validation; without
 // such a row, or with any other value, the action is skipped. No other action
 // ever runs with parameters.
+//
+// fim.scan runs with the canonical parameters of the pinned mode whose hash
+// the grant binds (fimScanParams); any other hash is skipped.
 func leaseActionParams(a actions.Action, da permit.ReadGrantAction, empty string, stored []boundParams) ([]byte, bool) {
 	if da.ParametersHash == empty {
 		return []byte(`{}`), len(a.Params) == 0
+	}
+	if a.ID == permit.FimScanActionID {
+		return fimScanParams(da.ParametersHash)
 	}
 	if a.ID != imageLeaseInspectAction && a.ID != imageLeaseImageAction {
 		return nil, false
@@ -168,6 +195,62 @@ func leaseActionParams(a actions.Action, da permit.ReadGrantAction, empty string
 		return canon, true
 	}
 	return nil, false
+}
+
+// fimScanModes are the two modes of fim-default-v1 a fim.scan entry may bind.
+var fimScanModes = []string{"incremental", "full"}
+
+// fimScanModeParams returns the canonical parameters of a fim.scan mode under
+// profile fim-default-v1 and their hash. The hash is checked against the
+// executor's pin (permit.FimScanIncrementalParametersHash or
+// permit.FimScanFullParametersHash), so the bytes always hash to what a grant
+// binds. ok is false for any other mode.
+func fimScanModeParams(mode string) (canon []byte, hash string, ok bool) {
+	var want string
+	switch mode {
+	case "incremental":
+		want = permit.FimScanIncrementalParametersHash
+	case "full":
+		want = permit.FimScanFullParametersHash
+	default:
+		return nil, "", false
+	}
+	raw, err := json.Marshal(map[string]string{"mode": mode, "profile": fimscan.DefaultProfileID})
+	if err != nil {
+		return nil, "", false
+	}
+	canon, hash, err = canonical.CanonicalParameters(raw)
+	if err != nil || hash != want {
+		return nil, "", false
+	}
+	return canon, hash, true
+}
+
+// fimScanParams returns the canonical parameters of the pinned fim.scan mode
+// whose hash is hash. Any other hash, a foreign profile or mode included, has
+// no parameters, so the entry is skipped.
+func fimScanParams(hash string) ([]byte, bool) {
+	for _, mode := range fimScanModes {
+		canon, h, ok := fimScanModeParams(mode)
+		if ok && h == hash {
+			return canon, true
+		}
+	}
+	return nil, false
+}
+
+// leaseActionFloor is the interval after which an entry is due again: the
+// lease interval or the action's floor, whichever is longer. A fim.scan entry
+// has the floor of its own mode (incremental 1 h, full 7 d - 6 h, the
+// executor's floors), so one mode never delays the other.
+func leaseActionFloor(la leaseAction) time.Duration {
+	if la.action.ID != permit.FimScanActionID {
+		return permit.ReadActionMinInterval(la.action.ID)
+	}
+	if la.hash == permit.FimScanFullParametersHash {
+		return permit.FimScanFullMinInterval
+	}
+	return permit.FimScanIncrementalMinInterval
 }
 
 // leaseActionRank orders the actions of one lease: docker.inspect first.
@@ -259,6 +342,9 @@ func (s *Service) RunDueReadGrants(ctx context.Context) {
 	if !ok {
 		return
 	}
+	if err := s.collectLeaseJobs(ctx); err != nil {
+		s.log.Error("read lease jobs", "error", err.Error())
+	}
 	cctx, cancel := context.WithTimeout(ctx, callTimeout)
 	r, err := exec.ListReadGrants(cctx, &pb.ListReadGrantsRequest{})
 	cancel()
@@ -294,6 +380,20 @@ func (s *Service) runLease(ctx context.Context, exec readGrantRunner, l ordinary
 		s.log.Error("read lease runs", "grant", l.id, "error", err.Error())
 		return nil
 	}
+	// fim.scan's floor is per host and mode across every lease and execution,
+	// so its newest run per host is read for all of them, not for this lease.
+	fimLast := map[string]map[string]time.Time{}
+	for _, la := range l.actions {
+		if la.action.ID != permit.FimScanActionID {
+			continue
+		}
+		m, err := s.fimScanLastRuns(ctx, la.params)
+		if err != nil {
+			s.log.Error("read lease runs", "grant", l.id, "error", err.Error())
+			return nil
+		}
+		fimLast[la.hash] = m
+	}
 	for _, t := range l.targets {
 		pin, ok := pinOf[t.HostID]
 		ref := l.credRef[t.HostID]
@@ -326,8 +426,14 @@ func (s *Service) runLease(ctx context.Context, exec readGrantRunner, l ordinary
 				// The action's own floor (ADR 0011 D3) can exceed the lease's
 				// interval; asking sooner only gets a refusal that stops the
 				// host's other actions for this tick.
-				due := max(l.interval, permit.ReadActionMinInterval(a.ID))
-				if at, ok := last[a.ID+"\x00"+t.HostID]; ok && s.now().Before(at.Add(due)) {
+				due := max(l.interval, leaseActionFloor(la))
+				at, seen := last[a.ID+"\x00"+t.HostID]
+				if a.ID == permit.FimScanActionID {
+					// fim.scan's floor is per host and mode across every lease and
+					// execution, and counts only the runs the executor started.
+					at, seen = fimLast[la.hash][t.HostID]
+				}
+				if seen && s.now().Before(at.Add(due)) {
 					continue
 				}
 			}
@@ -399,16 +505,32 @@ func (s *Service) runLeaseAction(ctx context.Context, exec readGrantRunner, l or
 	}
 	run := &pb.AuthorizeRunRequest{HostId: t.HostID, HostKeyFingerprint: t.HostKeyFingerprint, ActionId: a.ID, ModuleVersion: a.Version,
 		Artifact: a.Script, ParametersJson: la.params, CredentialRef: ref}
-	rctx, cancel := context.WithTimeout(ctx, a.Timeout+2*time.Minute)
+	callTimeout := a.Timeout + 2*time.Minute
+	if a.ID == permit.FimScanActionID {
+		callTimeout = durableReadCallTimeout
+	}
+	rctx, cancel := context.WithTimeout(ctx, callTimeout)
 	r, err := exec.RunReadGrant(rctx, &pb.RunReadGrantRequest{GrantId: l.id, Trigger: pb.ReadGrantTrigger_READ_GRANT_TRIGGER_SCHEDULED,
 		Run: run, Endpoints: eps, TimeoutSeconds: uint32(a.Timeout / time.Second)})
 	cancel()
 	code := status.Code(err)
 	switch {
 	case code == codes.OK:
+		if a.ID == permit.FimScanActionID {
+			// The executor answers once the durable job is started, not when
+			// it ends: the run is stored as running until collectLeaseJobs
+			// reads its outcome.
+			s.storeLeaseJob(ctx, l.id, a, t, ref, la.params, r.GetExecutionId())
+			return false, nil
+		}
 		s.storeLeaseRun(ctx, l.id, a, t, ref, la.params, r.GetExecutionId(), r.GetResult())
 		return r.GetResult().GetClass() == "success", nil
 	case code == codes.ResourceExhausted:
+		if a.ID == permit.FimScanActionID {
+			// Only this mode's interval has not passed; the host's other
+			// actions go on in this tick.
+			return false, errSkipRun
+		}
 		return false, errSkipTarget // the executor's interval or budget has not passed
 	case code == codes.NotFound,
 		code == codes.PermissionDenied && strings.HasPrefix(status.Convert(err).Message(), string(permit.CodeLeaseInactive)):
@@ -444,4 +566,119 @@ func (s *Service) storeLeaseRun(ctx context.Context, grantID string, a actions.A
 		return
 	}
 	s.finishHost(id, a.ID, t.HostID, res.GetClass(), res.GetDetail(), int(res.GetExitCode()), res.GetResult(), res.GetLog(), res.GetLogTruncated())
+}
+
+// storeLeaseJob records a durable fim.scan read of a lease that the executor
+// started. Its host is running and has no class until collectLeaseJobs stores
+// the job's outcome. The execution keeps state 'finished' with no finish time
+// until then: Resume restarts every execution in state 'running' through the
+// execution dispatcher, which must never see a lease run.
+func (s *Service) storeLeaseJob(ctx context.Context, grantID string, a actions.Action, t canonical.Target, ref string, params []byte, id string) {
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO executions (id, digest, action_id, module_version, artifact_sha256, risk, requirement, state,
+			durable, timeout_s, created_by, created_at, params, schedule_id) VALUES (?, '', ?, ?, ?, 'LOW', ?, 'finished', 1, ?, ?, ?, ?, ?)`,
+		id, a.ID, a.Version, a.SHA256(), leaseRunRequirement, int64(a.Timeout/time.Second), "schedule", s.now().Unix(), string(params), grantID); err != nil {
+		s.log.Error("store read lease job", "grant", grantID, "error", err.Error())
+		return
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO execution_hosts (execution_id, host_id, fingerprint, credential_ref, endpoints, state, started_at)
+		VALUES (?, ?, ?, ?, '[]', 'running', ?)`, id, t.HostID, t.HostKeyFingerprint, ref, s.now().Unix()); err != nil {
+		s.log.Error("store read lease job", "grant", grantID, "error", err.Error())
+		return
+	}
+	s.log.Info("audit", "kind", "read_lease_job_started", "grant", grantID, "execution", id, "host", t.HostID)
+}
+
+// leaseJobsPerTick bounds the durable lease jobs one tick collects.
+const leaseJobsPerTick = 64
+
+// collectLeaseJobs reads the outcome of the lease jobs stored as running. A
+// job that has ended is stored with its class, exit code, result and log, and
+// its result is released on the executor afterwards. A job the executor has
+// no record of ends as unknown and is never run again. A job still running,
+// or one whose read fails, stays running for the next tick. Only lease rows
+// are selected: schedule_id is the empty string (NOT NULL, default empty) for
+// every other execution, so a user's durable run in flight is never read here.
+func (s *Service) collectLeaseJobs(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT h.execution_id, h.host_id, e.action_id FROM execution_hosts h
+			JOIN executions e ON e.id = h.execution_id
+			WHERE h.state = 'running' AND e.durable = 1 AND e.schedule_id != '' AND e.requirement = ?
+			ORDER BY e.created_at, h.execution_id LIMIT ?`, leaseRunRequirement, leaseJobsPerTick)
+	if err != nil {
+		return fmt.Errorf("list read lease jobs: %w", err)
+	}
+	type job struct{ id, host, action string }
+	var jobs []job
+	for rows.Next() {
+		var j job
+		if err := rows.Scan(&j.id, &j.host, &j.action); err != nil {
+			rows.Close()
+			return fmt.Errorf("list read lease jobs: %w", err)
+		}
+		jobs = append(jobs, j)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("list read lease jobs: %w", err)
+	}
+	for _, j := range jobs {
+		cctx, cancel := context.WithTimeout(ctx, callTimeout)
+		r, err := s.exec.GetRun(cctx, &pb.GetRunRequest{ExecutionId: j.id, HostId: j.host})
+		cancel()
+		switch {
+		case status.Code(err) == codes.NotFound:
+			s.finishHost(j.id, j.action, j.host, "unknown", "the executor has no record of this run", -1, nil, nil, false)
+			s.finishLeaseExecution(ctx, j.id)
+			continue
+		case err != nil:
+			s.log.Warn("read lease job", "execution", j.id, "host", j.host, "error", refusal(err))
+			continue
+		case r.GetRun().GetState() != "finished":
+			continue
+		}
+		st := r.GetRun()
+		s.finishHost(j.id, j.action, j.host, st.GetClass(), st.GetDetail(), int(st.GetExitCode()), st.GetResult(), st.GetLog(), st.GetLogTruncated())
+		s.finishLeaseExecution(ctx, j.id)
+		cctx, cancel = context.WithTimeout(ctx, callTimeout)
+		if _, err := s.exec.GetRun(cctx, &pb.GetRunRequest{ExecutionId: j.id, HostId: j.host, Release: true}); err != nil {
+			s.log.Warn("release read lease job", "execution", j.id, "host", j.host, "error", refusal(err))
+		}
+		cancel()
+	}
+	return nil
+}
+
+// finishLeaseExecution sets the finish time of a lease execution once its job
+// has been collected.
+func (s *Service) finishLeaseExecution(ctx context.Context, id string) {
+	if _, err := s.db.ExecContext(ctx, `UPDATE executions SET finished_at = ? WHERE id = ? AND finished_at IS NULL`, s.now().Unix(), id); err != nil {
+		s.log.Error("finish read lease job", "execution", id, "error", err.Error())
+	}
+}
+
+// fimScanLastRuns returns, per host, the start of the newest fim.scan run with
+// the canonical parameters params that the executor started, whichever lease
+// or execution stored it. Only started runs count: the executor's floor moves
+// only when it starts a run. A request that is pending, rejected, expired, or
+// that never started on the host (its class is unknown, not executed, skipped
+// or not run) does not move the floor.
+func (s *Service) fimScanLastRuns(ctx context.Context, params []byte) (map[string]time.Time, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT h.host_id, max(h.started_at)
+		FROM executions e JOIN execution_hosts h ON h.execution_id = e.id
+		WHERE e.action_id = ? AND e.params = ? AND e.state IN ('running', 'finished')
+			AND h.started_at > 0 AND COALESCE(h.class, '') NOT IN ('unknown', 'not_executed', 'skipped', 'not_run')
+		GROUP BY h.host_id`, permit.FimScanActionID, string(params))
+	if err != nil {
+		return nil, fmt.Errorf("list fim.scan runs: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]time.Time{}
+	for rows.Next() {
+		var host string
+		var at int64
+		if err := rows.Scan(&host, &at); err != nil {
+			return nil, fmt.Errorf("list fim.scan runs: %w", err)
+		}
+		out[host] = time.Unix(at, 0)
+	}
+	return out, rows.Err()
 }

@@ -136,6 +136,7 @@ type imageClient struct {
 	mu             sync.Mutex
 	steps          []PveMutationStep
 	templateDigest string
+	tpl            PveTemplateReader
 }
 
 func (c *imageClient) TaskType(method string) (string, bool) { return ImageStepTaskType(method) }
@@ -158,6 +159,29 @@ func (c *imageClient) TargetState(ctx context.Context, rm executordb.PveRemote, 
 		c.mu.Unlock()
 	}
 	return live, err
+}
+
+// TemplateConfig implements PveTemplateReader: through the reader set
+// with setTemplateReader (the production client against a loopback PVE
+// fake), or else the fake's node with the set template digest.
+func (c *imageClient) TemplateConfig(ctx context.Context, rm executordb.PveRemote, node string, vmid uint64, tok pveapi.TokenSupplier) (PveTemplateConfig, error) {
+	c.mu.Lock()
+	tpl, digest := c.tpl, c.templateDigest
+	c.mu.Unlock()
+	if tpl != nil {
+		return tpl.TemplateConfig(ctx, rm, node, vmid, tok)
+	}
+	live, err := c.fakeMutClient.TargetState(ctx, rm, permit.ProviderKindQemu, node, vmid, tok)
+	if err != nil {
+		return PveTemplateConfig{}, err
+	}
+	return PveTemplateConfig{Found: true, Node: live.Node, ConfigDigest: digest}, nil
+}
+
+func (c *imageClient) setTemplateReader(r PveTemplateReader) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.tpl = r
 }
 
 func (c *imageClient) setTemplateDigest(d string) {
@@ -388,8 +412,8 @@ func TestImageCatalogLocalEntryCannotShadowSigned(t *testing.T) {
 	if err := e.imgs.Catalog.AddLocal(release.Image{ID: "local-x", OS: "x", Release: "1", Arch: "amd64", URL: "http://insecure.example/x.qcow2", SHA256: imgLocalSHA, DiskFormat: "qcow2"}); !errors.Is(err, release.ErrFormat) {
 		t.Fatalf("local http entry: %v", err)
 	}
-	if !e.imgs.Catalog.RemoveLocal(imgLocalID) {
-		t.Fatal("remove local")
+	if removed, err := e.imgs.Catalog.RemoveLocal(imgLocalID); err != nil || !removed {
+		t.Fatalf("remove local: %v %v", removed, err)
 	}
 	if _, _, err := e.imgs.ProposalRequest(context.Background(), prepareReq(imgLocalID, 9000), "00000000-0000-4000-b000-999999999999", canonical.RiskHigh,
 		strings.Repeat("c", 64), time.Now().Add(time.Hour)); !errors.Is(err, ErrPveImageUnknown) {
