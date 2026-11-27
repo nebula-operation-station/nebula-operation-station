@@ -20,6 +20,7 @@ import (
 	"unicode"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/integrity"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/notifylog"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/release"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"google.golang.org/protobuf/proto"
@@ -189,15 +190,64 @@ type integrityStatusPage struct {
 	// log receives the fixed-word warnings of failed executor reads; nil
 	// means slog.Default.
 	log *slog.Logger
+	// held reads the notification log for integrity messages the hourly
+	// limit held back. Nil means the page has no held block.
+	held notifyLister
+}
+
+// Held integrity messages on the status page (IG-08): the newest
+// integrityHeldScan log entries are read and the first integrityHeldShow
+// held integrity messages among them are shown.
+const (
+	integrityHeldShow = 10
+	integrityHeldScan = 200
+	// integrityHeldReadFailedMsg is the fixed log message for a failed read
+	// of the notification log.
+	integrityHeldReadFailedMsg = "integrity status: held messages unavailable"
+)
+
+// notifyLister reads the notification log, newest first. *notifylog.Store
+// implements it.
+type notifyLister interface {
+	List(ctx context.Context, afterSeq int64, limit int) ([]notifylog.Entry, error)
+}
+
+// heldLister returns the held-message source for s, or nil when there is no
+// notification log. A nil *notifylog.Store is not passed on as a non-nil
+// interface.
+func heldLister(s *notifylog.Store) notifyLister {
+	if s == nil {
+		return nil
+	}
+	return s
+}
+
+// heldView is one integrity message the hourly limit held back, as text.
+// It carries the kind, the host label and the reason code only.
+type heldView struct {
+	At     string `json:"at"`
+	Kind   string `json:"kind"`
+	Host   string `json:"host"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// heldBlock is the held block of the status page. Available is false when
+// the notification log could not be read; Items is then empty.
+type heldBlock struct {
+	Available bool       `json:"available"`
+	Items     []heldView `json:"items,omitempty"`
 }
 
 // integrityStatusJSON is the JSON form. The server's check keeps its
 // fields at the top level (as before the executor status was added) and
-// is labelled by Source; the executor's status sits under Executor.
+// is labelled by Source; the executor's status sits under Executor, and
+// the held integrity messages under HeldNotifications (omitted without a
+// notification log).
 type integrityStatusJSON struct {
 	Source string `json:"source"`
 	integrity.SelfCheck
-	Executor executorView `json:"executor"`
+	Executor          executorView `json:"executor"`
+	HeldNotifications *heldBlock   `json:"held_notifications,omitempty"`
 }
 
 // executorView is the executor's status as text, ready to render. Every
@@ -278,7 +328,13 @@ func mountIntegrityStatus(mux *http.ServeMux, m *integrity.Monitor, read integri
 // mountIntegrityStatusLog is mountIntegrityStatus with the logger for the
 // warnings of failed executor reads.
 func mountIntegrityStatusLog(mux *http.ServeMux, m *integrity.Monitor, read integrityStatusReader, log *slog.Logger) {
-	p := integrityStatusPage{monitor: m, read: read, now: time.Now, log: log}
+	mountIntegrityStatusHeld(mux, m, read, log, nil)
+}
+
+// mountIntegrityStatusHeld is mountIntegrityStatusLog with the notification
+// log that lists the held integrity messages (nil: no held block).
+func mountIntegrityStatusHeld(mux *http.ServeMux, m *integrity.Monitor, read integrityStatusReader, log *slog.Logger, held notifyLister) {
+	p := integrityStatusPage{monitor: m, read: read, now: time.Now, log: log, held: held}
 	mux.HandleFunc("GET "+integrityStatusPath, p.serve)
 }
 
@@ -287,10 +343,11 @@ func mountIntegrityStatusLog(mux *http.ServeMux, m *integrity.Monitor, read inte
 func (p integrityStatusPage) serve(w http.ResponseWriter, r *http.Request) {
 	server := p.monitor.Status()
 	exec := p.executor(r.Context())
+	held := p.heldMessages(r.Context())
 	w.Header().Set("Cache-Control", "no-store")
 	if strings.Contains(r.Header.Get("Accept"), "text/html") {
 		var buf bytes.Buffer
-		data := integrityPageData{Server: server, ServerChecked: stampTime(server.Checked), Executor: exec}
+		data := integrityPageData{Server: server, ServerChecked: stampTime(server.Checked), Executor: exec, Held: held}
 		if err := integrityPageTmpl.Execute(&buf, data); err != nil {
 			http.Error(w, "integrity status unavailable", http.StatusInternalServerError)
 			return
@@ -299,7 +356,7 @@ func (p integrityStatusPage) serve(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(buf.Bytes())
 		return
 	}
-	b, err := json.Marshal(integrityStatusJSON{Source: serverSourceLabel, SelfCheck: server, Executor: exec})
+	b, err := json.Marshal(integrityStatusJSON{Source: serverSourceLabel, SelfCheck: server, Executor: exec, HeldNotifications: held})
 	if err != nil {
 		http.Error(w, "integrity status unavailable", http.StatusInternalServerError)
 		return
@@ -335,6 +392,37 @@ func (p integrityStatusPage) executor(ctx context.Context) executorView {
 		return unavailable
 	}
 	return executorViewOf(resp, checked)
+}
+
+// heldMessages reads the held integrity messages from the notification log.
+// It returns nil without a log. A failed read gives an unavailable block, is
+// logged with a fixed message, and never hides the other blocks. Only
+// entries with outcome held_rate_limit and an integrity kind are listed.
+func (p integrityStatusPage) heldMessages(ctx context.Context) *heldBlock {
+	if p.held == nil {
+		return nil
+	}
+	entries, err := p.held.List(ctx, 0, integrityHeldScan)
+	if err != nil {
+		p.warn(integrityHeldReadFailedMsg)
+		return &heldBlock{Available: false}
+	}
+	b := &heldBlock{Available: true}
+	for _, e := range entries {
+		if len(b.Items) == integrityHeldShow {
+			break
+		}
+		if e.Outcome != notifylog.OutcomeHeldRateLimit || !strings.HasPrefix(string(e.Kind), "integrity.") {
+			continue
+		}
+		b.Items = append(b.Items, heldView{
+			At:     stampTime(e.At),
+			Kind:   clipText(string(e.Kind)),
+			Host:   clipText(e.Host),
+			Reason: clipText(string(e.Reason)),
+		})
+	}
+	return b
 }
 
 // warn logs a fixed message for a failed executor read.
@@ -482,6 +570,8 @@ type integrityPageData struct {
 	Server        integrity.SelfCheck
 	ServerChecked string
 	Executor      executorView
+	// Held is nil without a notification log: the section is then absent.
+	Held *heldBlock
 }
 
 // integrityPageTmpl renders the page. html/template escapes every value,
@@ -575,6 +665,23 @@ var integrityPageTmpl = template.Must(template.New("integrity").Parse(`<!doctype
 {{- end}}
 {{- end}}
 </section>
+{{- with .Held}}
+<section id="held-notifications">
+<h2>Zurückgehaltene Integritätsmeldungen</h2>
+<p>Quelle: Benachrichtigungslog. Diese Meldungen wurden durch das Stundenlimit nicht gesendet.</p>
+{{- if not .Available}}
+<p><strong>nicht verfügbar</strong></p>
+{{- else if not .Items}}
+<p>Keine.</p>
+{{- else}}
+<ul>
+{{- range .Items}}
+<li>{{.At}} {{.Kind}} Host {{.Host}} ({{.Reason}})</li>
+{{- end}}
+</ul>
+{{- end}}
+</section>
+{{- end}}
 </body>
 </html>
 `))

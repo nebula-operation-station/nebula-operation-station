@@ -722,7 +722,8 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	batchPages.Register(pages)
 	softwarePages.Register(pages)
 	connPages.Register(pages)
-	mountIntegrityStatusLog(pages, selfCheck, lazyIntegrityStatus(exec), log)
+	// The held integrity messages (IG-08) come from the notification log.
+	mountIntegrityStatusHeld(pages, selfCheck, lazyIntegrityStatus(exec), log, heldLister(notifyLog))
 	// Findings export (ADR 0011 D9): admin only, audited, streamed.
 	pages.Handle("GET "+vulnExportPath, vulnExport{v: vuln, admin: isAdmin, audit: audit, log: log})
 	// Feature pages (features.go): the attack-path pages (ADR 0011 D10,
