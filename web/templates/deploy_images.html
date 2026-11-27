@@ -1,0 +1,69 @@
+{{define "content"}}{{$d := .DeployImages}}
+<h1>Deploy Images</h1>
+{{template "deploy_tabs" .}}
+<section class="panel" aria-label="Image catalog">
+  <h2>Image catalog</h2>
+  <p class="hint">Read-only view of the executor's image catalog: the signed entries from the release bundle and the local entries. A template can be provisioned only after the image was prepared into a template record (listed below). Catalog text comes from the executor and is shown as text; only https links are clickable.</p>
+  {{if not $d.View.Available}}
+  <p class="status status--warning">Not available: the executor did not answer. Nothing is shown as prepared or as missing until it answers again.</p>
+  {{else}}
+  <p class="hint">Catalog sequence <span class="mono">{{$d.View.CatalogSequence}}</span>{{if $d.View.CatalogDigest}}, digest <span class="mono">{{$d.View.CatalogDigest}}</span>{{end}}{{if eq $d.View.CatalogSequence 0}} (no signed catalog is loaded){{end}}.</p>
+  {{if $d.View.Images}}
+  <div class="table-wrap">
+  <table class="inventory">
+    <thead><tr><th>ID</th><th>OS</th><th>Release</th><th>Architecture</th><th>URL</th><th>SHA-256</th><th>Format</th><th>Trust</th><th>Catalog sequence</th></tr></thead>
+    <tbody>
+      {{range $d.View.Images}}
+      <tr>
+        <td>{{.ID}}</td>
+        <td>{{.OS}}</td>
+        <td>{{.Release}}</td>
+        <td>{{.Arch}}</td>
+        <td>{{if .Link}}<a href="{{.Link}}" rel="noopener noreferrer">{{.URL}}</a>{{else}}<span class="mono">{{.URL}}</span>{{end}}</td>
+        <td class="mono">{{.SHA256}}</td>
+        <td>{{.DiskFormat}}</td>
+        <td>{{.Trust}}</td>
+        <td>{{if .CatalogSequence}}{{.CatalogSequence}}{{else}}local{{end}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}
+  <p>No image catalog entries.</p>
+  {{end}}
+  {{end}}
+</section>
+<section class="panel" aria-label="Prepared templates">
+  <h2>Prepared templates</h2>
+  <p class="hint">Template records the executor wrote when an image was prepared. The new deployment wizard offers exactly these records for its node; the VMID, generation and SHA-256 shown here are the ones a deployment binds.</p>
+  {{if $d.View.Available}}
+  {{if $d.View.Templates}}
+  <div class="table-wrap">
+  <table class="inventory">
+    <thead><tr><th>Remote</th><th>Node</th><th>Storage</th><th>Image</th><th>Trust</th><th>VMID</th><th>Generation</th><th>Source SHA-256</th><th>Trust generation</th><th>Prepared</th><th>Execution</th></tr></thead>
+    <tbody>
+      {{range $d.View.Templates}}
+      <tr>
+        <td>{{.Remote}}</td>
+        <td>{{.Node}}</td>
+        <td>{{.Storage}}</td>
+        <td>{{.Image}}</td>
+        <td>{{.Trust}}</td>
+        <td>{{.VMID}}</td>
+        <td>{{.Generation}}</td>
+        <td class="mono">{{.SourceSHA256}}</td>
+        <td>{{.TrustGeneration}}</td>
+        <td>{{timeTag .PreparedAt}}</td>
+        <td class="mono">{{.ExecutionID}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}
+  <p>No prepared templates yet.</p>
+  {{end}}
+  {{end}}
+</section>
+{{end}}

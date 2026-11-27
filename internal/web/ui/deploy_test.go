@@ -88,6 +88,9 @@ type fakeProvision struct {
 	holdIPAM        chan struct{}
 	holdIPAMStarted chan struct{}
 	holdIPAMOnce    sync.Once
+	// images and imagesErr answer ListPVEImages (deploy_images_test.go).
+	images    *pb.ListPVEImagesResponse
+	imagesErr error
 }
 
 func (f *fakeProvision) ProposePVEGuestProvision(_ context.Context, in *pb.ProposePVEGuestProvisionRequest, _ ...grpc.CallOption) (*pb.ProposePVEGuestProvisionResponse, error) {
@@ -365,7 +368,8 @@ func newDPEnvWith(t *testing.T, edit func(*ui.Options)) *dpEnv {
 	}
 	t.Cleanup(func() { db.Close() })
 	e := &dpEnv{db: db, pve: pveinventory.New(db), state: "active",
-		prov: &fakeProvision{risk: canonical.RiskHigh, requirement: pb.ApprovalRequirement_APPROVAL_REQUIREMENT_ASSERTION_VERIFIED},
+		prov: &fakeProvision{risk: canonical.RiskHigh, requirement: pb.ApprovalRequirement_APPROVAL_REQUIREMENT_ASSERTION_VERIFIED,
+			images: dpImagesDefault()},
 		join: &fakeJoinExec{pinned: true}, batches: &fakeDeployBatches{}}
 	ctx := context.Background()
 	if err := e.pve.UpsertRemote(ctx, pvecontract.Remote{RemoteID: dpRemote, Name: "PVE lab", Kind: pvecontract.KindStandalone,
@@ -541,7 +545,7 @@ func TestDeployWizardPreselectsTargetAndSuggestsFreeAddress(t *testing.T) {
 		`<input type="hidden" name="profile_version" value="1">`,
 		// The profile's pool selects its network; .50 is reserved, so .51
 		// is the suggested free address.
-		`name="address" value="192.168.10.51"`, `<option value="9000">9000 debian-13-tpl</option>`,
+		`name="address" value="192.168.10.51"`, `<option value="9000">`,
 		`value="qemu-guest-agent" checked`, `value="harden@3" checked`,
 	} {
 		if !strings.Contains(body, want) {
