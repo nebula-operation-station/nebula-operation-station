@@ -139,7 +139,14 @@ func pveImageListed(t *testing.T, id string) bool {
 }
 
 func TestPveImageUsageRefusedBeforeDial(t *testing.T) {
-	// No executor socket: every case must fail on its arguments.
+	// No executor socket: every case must fail on its arguments. The
+	// executor user is the test's own, so a case that wrongly passes the
+	// CLI checks gets past the user lookup and fails on absent.sock.
+	u, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NEBULA_EXECUTOR_USER", u.Username)
 	t.Setenv("NEBULA_EXECUTOR_SOCKET", filepath.Join(t.TempDir(), "absent.sock"))
 	long := func(n int) string { return strings.Repeat("a", n) }
 	withFlag := func(name, value string) []string { return pveImageAddArgsWith("local-rocky-9", name, value) }
