@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -16,12 +17,14 @@ import (
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/auditlog"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnstore"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
+	"google.golang.org/grpc"
 )
 
 // vdEnv is the decision backend over a real findings store, audit log and
@@ -64,6 +67,23 @@ func (a vdFailingAudit) WithTx(ctx context.Context, fn func(tx *sql.Tx, appendLi
 		}
 		return errors.New("audit write failed")
 	})
+}
+
+// vdShortLogin is the executor's login with every challenge expiring at
+// expiry, which is shorter than the server's own challenge TTL.
+type vdShortLogin struct {
+	*vaLogins
+	expiry time.Time
+}
+
+// BeginLogin begins a login challenge that the executor expires at expiry.
+func (l vdShortLogin) BeginLogin(ctx context.Context, in *executorv1.BeginLoginRequest, opts ...grpc.CallOption) (*executorv1.BeginLoginResponse, error) {
+	b, err := l.vaLogins.BeginLogin(ctx, in, opts...)
+	if err != nil {
+		return nil, err
+	}
+	b.ExpiryUnix = l.expiry.Unix()
+	return b, nil
 }
 
 // vdFinding is an open finding of clsHost with NOS's own read of the old
@@ -164,22 +184,32 @@ func (x *vdEnv) state(t *testing.T, f vulnstore.Finding) vulnstore.State {
 	return got.State
 }
 
-// vdAccept is an accept_risk decision on f, expiring in thirty days.
+// vdAccept is an accept_risk decision on f, expiring in thirty days. Its
+// approver is "dana", not the maintainer who asserts it ("alice"): the
+// approver of the stored decision must be the maintainer anyway.
 func vdAccept(x *vdEnv, f vulnstore.Finding) ui.VulnDecision {
-	return ui.VulnDecision{Kind: ui.VulnAcceptRisk, Key: f.Key, Approver: "alice", Reason: "vendor patch scheduled",
+	return ui.VulnDecision{Kind: ui.VulnAcceptRisk, Key: f.Key, Approver: "dana", Reason: "vendor patch scheduled",
 		Expires: x.e.clk.Now().Add(30 * 24 * time.Hour).UTC().Truncate(time.Second)}
 }
 
-// TestVulnDecisionKindsApplyOnceWithAssertion: each of the five kinds is
-// applied by one good assertion, writes its audit line once, and the same
-// challenge cannot be used again.
-func TestVulnDecisionKindsApplyOnceWithAssertion(t *testing.T) {
+// vdCommit commits d as user with challenge id and the good assertion.
+func vdCommit(x *vdEnv, user, id string, d ui.VulnDecision) error {
+	return x.dec.CommitVulnDecision(context.Background(), user, id, d, []byte(vaGoodAssertion))
+}
+
+// vdKind is one decision kind: its name, the audit kind of the line it
+// writes, and the setup that makes a decision of the kind applicable. The
+// setup returns the decision and a check of the applied decision.
+type vdKind struct {
+	name  string
+	kind  string
+	setup func(t *testing.T, x *vdEnv) (ui.VulnDecision, func())
+}
+
+// vdKinds returns the five decision kinds (ADR 0011 D5, D6).
+func vdKinds() []vdKind {
 	ctx := context.Background()
-	tests := []struct {
-		name  string
-		kind  string
-		setup func(t *testing.T, x *vdEnv) (ui.VulnDecision, func())
-	}{
+	return []vdKind{
 		{"accept_risk", vulnstore.AuditVulnAcceptedRisk, func(t *testing.T, x *vdEnv) (ui.VulnDecision, func()) {
 			f := vdFinding(t, x.e, "CVE-2026-8101")
 			return vdAccept(x, f), func() {
@@ -231,7 +261,14 @@ func TestVulnDecisionKindsApplyOnceWithAssertion(t *testing.T) {
 			}
 		}},
 	}
-	for _, tt := range tests {
+}
+
+// TestVulnDecisionKindsApplyOnceWithAssertion: each of the five kinds is
+// applied by one good assertion, writes its audit line once, and the same
+// challenge cannot be used again.
+func TestVulnDecisionKindsApplyOnceWithAssertion(t *testing.T) {
+	ctx := context.Background()
+	for _, tt := range vdKinds() {
 		t.Run(tt.name, func(t *testing.T) {
 			x := newVDEnv(t, "alice", nil)
 			d, check := tt.setup(t, x)
@@ -254,95 +291,154 @@ func TestVulnDecisionKindsApplyOnceWithAssertion(t *testing.T) {
 	}
 }
 
+// TestVulnDecisionAcceptRiskRecordsTheMaintainer: the approver named in the
+// browser's body is not trusted. The stored decision and its audit line name
+// the maintainer whose assertion applied it, whatever the body says.
+func TestVulnDecisionAcceptRiskRecordsTheMaintainer(t *testing.T) {
+	x := newVDEnv(t, "alice", nil)
+	f := vdFinding(t, x.e, "CVE-2026-8801")
+	d := vdAccept(x, f)
+	if d.Approver == "alice" {
+		t.Fatal("test setup: the body's approver must differ from the maintainer")
+	}
+	id := x.begin(t, "alice", d)
+	if err := vdCommit(x, "alice", id, d); err != nil {
+		t.Fatalf("commit = %v", err)
+	}
+	if got := x.state(t, f); got != vulnstore.StateAcceptedRisk {
+		t.Fatalf("state = %s, want accepted_risk", got)
+	}
+	got := x.audits(t, vulnstore.AuditVulnAcceptedRisk)
+	if len(got) != 1 || got[0].User != "alice" || got[0].Attrs["actor"] != "alice" {
+		t.Fatalf("audit = %+v; want one line naming the maintainer alice as actor", got)
+	}
+}
+
+// TestVulnDecisionChallengeExpiresAtTheExecutorExpiry: the executor may expire
+// a login challenge before the server's own TTL; the decision is then refused
+// in the gap, and accepted before it.
+func TestVulnDecisionChallengeExpiresAtTheExecutorExpiry(t *testing.T) {
+	ctx := context.Background()
+	t.Run("refused after the executor expiry", func(t *testing.T) {
+		x := newVDEnv(t, "alice", nil)
+		f := vdFinding(t, x.e, "CVE-2026-8701")
+		d := vdAccept(x, f)
+		x.dec.login = vdShortLogin{vaLogins: x.login, expiry: x.e.clk.Now().Add(30 * time.Second)}
+		id := x.begin(t, "alice", d)
+		x.e.clk.Add(31 * time.Second)
+		if err := x.dec.CommitVulnDecision(ctx, "alice", id, d, []byte(vaGoodAssertion)); !errors.Is(err, ui.ErrVulnAssertionRefused) {
+			t.Fatalf("commit after the executor expiry = %v, want refused", err)
+		}
+		if got := x.state(t, f); got != vulnstore.StateOpen {
+			t.Fatalf("state = %s, want open", got)
+		}
+	})
+	t.Run("accepted before the executor expiry", func(t *testing.T) {
+		x := newVDEnv(t, "alice", nil)
+		f := vdFinding(t, x.e, "CVE-2026-8702")
+		d := vdAccept(x, f)
+		x.dec.login = vdShortLogin{vaLogins: x.login, expiry: x.e.clk.Now().Add(time.Minute)}
+		id := x.begin(t, "alice", d)
+		x.e.clk.Add(30 * time.Second)
+		if err := vdCommit(x, "alice", id, d); err != nil {
+			t.Fatalf("commit before the executor expiry = %v, want nil", err)
+		}
+	})
+}
+
+// vdSnapshot is the stored state that a decision of d's kind would change:
+// the finding and its holds, or the mark of the feed source for mark_reset.
+func vdSnapshot(t *testing.T, x *vdEnv, d ui.VulnDecision) string {
+	t.Helper()
+	ctx := context.Background()
+	if d.Kind == ui.VulnMarkReset {
+		view, err := x.e.svc.store.MarkResetCandidate(ctx, d.SourceID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fmt.Sprintf("%+v", view)
+	}
+	got, err := x.e.svc.store.Get(ctx, d.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holds, err := x.e.svc.store.Holds(ctx, d.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("state=%s holds=%+v", got.State, holds)
+}
+
 // TestVulnDecisionRefusedWithoutAValidAssertion: every refusal leaves the
-// finding, the hold and the audit log as they were, for each kind.
+// finding, the holds and the audit log as they were, for each of the five
+// kinds, and each refusal path is run for every kind.
 func TestVulnDecisionRefusedWithoutAValidAssertion(t *testing.T) {
 	ctx := context.Background()
 	tests := []struct {
 		name string
-		// run performs the refused attempt and returns its error.
-		run func(t *testing.T, x *vdEnv, f vulnstore.Finding, run string, d ui.VulnDecision) error
+		// run performs the refused attempt for decision d and returns its error.
+		run func(t *testing.T, x *vdEnv, d ui.VulnDecision) error
 	}{
-		{"not the maintainer at begin", func(t *testing.T, x *vdEnv, _ vulnstore.Finding, _ string, d ui.VulnDecision) error {
+		{"not the maintainer at begin", func(t *testing.T, x *vdEnv, d ui.VulnDecision) error {
 			x.admin = false
 			_, err := x.dec.BeginVulnDecision(ctx, "alice", d)
 			return err
 		}},
-		{"not the maintainer at commit", func(t *testing.T, x *vdEnv, _ vulnstore.Finding, _ string, d ui.VulnDecision) error {
+		{"not the maintainer at commit", func(t *testing.T, x *vdEnv, d ui.VulnDecision) error {
 			id := x.begin(t, "alice", d)
 			x.admin = false
-			return x.dec.CommitVulnDecision(ctx, "alice", id, d, []byte(vaGoodAssertion))
+			return vdCommit(x, "alice", id, d)
 		}},
-		{"other user commits", func(t *testing.T, x *vdEnv, _ vulnstore.Finding, _ string, d ui.VulnDecision) error {
+		{"other user commits", func(t *testing.T, x *vdEnv, d ui.VulnDecision) error {
 			id := x.begin(t, "alice", d)
-			return x.dec.CommitVulnDecision(ctx, "bob", id, d, []byte(vaGoodAssertion))
+			return vdCommit(x, "bob", id, d)
 		}},
-		{"assertion of another user", func(t *testing.T, x *vdEnv, _ vulnstore.Finding, _ string, d ui.VulnDecision) error {
+		{"assertion of another user", func(t *testing.T, x *vdEnv, d ui.VulnDecision) error {
 			x.login.user = "bob"
 			id := x.begin(t, "alice", d)
-			return x.dec.CommitVulnDecision(ctx, "alice", id, d, []byte(vaGoodAssertion))
+			return vdCommit(x, "alice", id, d)
 		}},
-		{"other digest", func(t *testing.T, x *vdEnv, _ vulnstore.Finding, _ string, d ui.VulnDecision) error {
+		{"other digest", func(t *testing.T, x *vdEnv, d ui.VulnDecision) error {
 			id := x.begin(t, "alice", d)
 			other := d
 			other.Reason = "a different reason"
-			return x.dec.CommitVulnDecision(ctx, "alice", id, other, []byte(vaGoodAssertion))
+			return vdCommit(x, "alice", id, other)
 		}},
-		{"expired", func(t *testing.T, x *vdEnv, _ vulnstore.Finding, _ string, d ui.VulnDecision) error {
+		{"expired", func(t *testing.T, x *vdEnv, d ui.VulnDecision) error {
 			id := x.begin(t, "alice", d)
 			x.e.clk.Add(vulnDecisionChallengeTTL + time.Second)
-			return x.dec.CommitVulnDecision(ctx, "alice", id, d, []byte(vaGoodAssertion))
+			return vdCommit(x, "alice", id, d)
 		}},
-		{"refused assertion", func(t *testing.T, x *vdEnv, _ vulnstore.Finding, _ string, d ui.VulnDecision) error {
+		{"refused assertion", func(t *testing.T, x *vdEnv, d ui.VulnDecision) error {
 			id := x.begin(t, "alice", d)
 			return x.dec.CommitVulnDecision(ctx, "alice", id, d, []byte(`{"id":"forged"}`))
 		}},
-		{"no assertion", func(t *testing.T, x *vdEnv, _ vulnstore.Finding, _ string, d ui.VulnDecision) error {
+		{"no assertion", func(t *testing.T, x *vdEnv, d ui.VulnDecision) error {
 			id := x.begin(t, "alice", d)
 			return x.dec.CommitVulnDecision(ctx, "alice", id, d, nil)
 		}},
-		{"unknown challenge", func(t *testing.T, x *vdEnv, _ vulnstore.Finding, _ string, d ui.VulnDecision) error {
-			return x.dec.CommitVulnDecision(ctx, "alice", strings.Repeat("a", 32), d, []byte(vaGoodAssertion))
+		{"unknown challenge", func(t *testing.T, x *vdEnv, d ui.VulnDecision) error {
+			return vdCommit(x, "alice", strings.Repeat("a", 32), d)
 		}},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			x := newVDEnv(t, "alice", nil)
-			f := vdFinding(t, x.e, "CVE-2026-8201")
-			err := tt.run(t, x, f, "", vdAccept(x, f))
-			if !errors.Is(err, ui.ErrVulnAssertionRefused) {
-				t.Fatalf("err = %v, want refused", err)
-			}
-			if got := x.state(t, f); got != vulnstore.StateOpen {
-				t.Fatalf("state = %s, want open", got)
-			}
-			if got := x.audits(t, vulnstore.AuditVulnAcceptedRisk); len(got) != 0 {
-				t.Fatalf("audit = %+v, want none", got)
-			}
-		})
-	}
-}
-
-// TestVulnDecisionDiscardHoldNeedsAnAssertion: discarding a held closure is
-// refused without an assertion and with a refused one, and the hold stays.
-func TestVulnDecisionDiscardHoldNeedsAnAssertion(t *testing.T) {
-	ctx := context.Background()
-	x := newVDEnv(t, "alice", nil)
-	f, run := vdHeld(t, x.e, "CVE-2026-8301")
-	d := ui.VulnDecision{Kind: ui.VulnDiscardHold, Key: f.Key, RunID: run}
-	for name, assertion := range map[string][]byte{"no assertion": nil, "refused assertion": []byte(`{"id":"forged"}`)} {
-		t.Run(name, func(t *testing.T) {
-			id := x.begin(t, "alice", d)
-			if err := x.dec.CommitVulnDecision(ctx, "alice", id, d, assertion); !errors.Is(err, ui.ErrVulnAssertionRefused) {
-				t.Fatalf("commit = %v, want refused", err)
-			}
-			if h, err := x.e.svc.store.Holds(ctx, f.Key); err != nil || len(h) != 1 {
-				t.Fatalf("holds = %+v, %v; want the hold kept", h, err)
-			}
-			if got := x.audits(t, vulnstore.AuditVulnHoldDiscarded); len(got) != 0 {
-				t.Fatalf("audit = %+v, want none", got)
-			}
-		})
+	for _, kind := range vdKinds() {
+		for _, tt := range tests {
+			t.Run(kind.name+"/"+tt.name, func(t *testing.T) {
+				x := newVDEnv(t, "alice", nil)
+				d, _ := kind.setup(t, x)
+				before := vdSnapshot(t, x, d)
+				err := tt.run(t, x, d)
+				if !errors.Is(err, ui.ErrVulnAssertionRefused) {
+					t.Fatalf("err = %v, want refused", err)
+				}
+				if after := vdSnapshot(t, x, d); after != before {
+					t.Fatalf("stored state changed by a refused decision:\nbefore %s\nafter  %s", before, after)
+				}
+				if got := x.audits(t, kind.kind); len(got) != 0 {
+					t.Fatalf("audit = %+v, want none", got)
+				}
+			})
+		}
 	}
 }
 
@@ -381,8 +477,15 @@ func TestVulnDecisionBasisComesFromNOS(t *testing.T) {
 	}
 }
 
-// TestVulnDecisionChallengesAreBounded: begun decisions are bounded like the
-// agent settings challenges.
+// vdExecutorBegins returns how many login challenges the executor has begun.
+func vdExecutorBegins(l *vaLogins) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.n
+}
+
+// TestVulnDecisionChallengesAreBounded: begun decisions are bounded, and a
+// begin over the bound is refused before the executor begins a challenge.
 func TestVulnDecisionChallengesAreBounded(t *testing.T) {
 	ctx := context.Background()
 	x := newVDEnv(t, "alice", nil)
@@ -391,8 +494,12 @@ func TestVulnDecisionChallengesAreBounded(t *testing.T) {
 	for i := 0; i < maxVulnDecisionChallenges; i++ {
 		x.begin(t, "alice", d)
 	}
+	before := vdExecutorBegins(x.login)
 	if _, err := x.dec.BeginVulnDecision(ctx, "alice", d); !errors.Is(err, errVulnDecisionChallengeFull) {
 		t.Fatalf("begin over the bound = %v, want %v", err, errVulnDecisionChallengeFull)
+	}
+	if after := vdExecutorBegins(x.login); after != before {
+		t.Fatalf("executor began %d challenges for the refused begin, want none", after-before)
 	}
 }
 

@@ -37,13 +37,14 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// Limits of the decision challenges. They are the bounds of the agent
+// Limits of the decision challenges. The TTL is the bound of the agent
 // settings challenges (vuln_agentcfg.go): the executor's login challenge
-// expires after two minutes as well, and the pool of begun challenges is
-// bounded the same way.
+// expires after two minutes as well. The pool of begun decisions is as large
+// as the UI's pending table (ui.maxVulnPending), so a full server pool cannot
+// be reached before the UI's own bound answers 429.
 const (
 	vulnDecisionChallengeTTL  = vulnAgentChallengeTTL
-	maxVulnDecisionChallenges = maxVulnAgentChallenges
+	maxVulnDecisionChallenges = 64
 )
 
 // vulnDecisionChallenge is a begun decision: its challenge belongs to user
@@ -82,10 +83,14 @@ func newVulnDecider(v *vulnService, audit vulnstore.DecisionAuditor, admin func(
 }
 
 // BeginVulnDecision re-checks the maintainer, starts an executor login
-// challenge and binds it to user and the decision's digest.
+// challenge and binds it to user and the decision's digest. The pool bound is
+// checked before the executor is asked, so a refused begin uses no challenge.
 func (d *vulnDecider) BeginVulnDecision(ctx context.Context, user string, dec ui.VulnDecision) (ui.VulnChallenge, error) {
 	if !d.admin(ctx) {
 		return ui.VulnChallenge{}, ui.ErrVulnAssertionRefused
+	}
+	if err := d.reserve(); err != nil {
+		return ui.VulnChallenge{}, err
 	}
 	b, err := d.login.BeginLogin(ctx, &pb.BeginLoginRequest{})
 	if err != nil {
@@ -99,14 +104,12 @@ func (d *vulnDecider) BeginVulnDecision(ctx context.Context, user string, dec ui
 	id := b.GetLoginId()
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	for k, p := range d.pending {
-		if !now.Before(p.expires) {
-			delete(d.pending, k)
-		}
-	}
+	d.pruneLocked(now)
 	if _, dup := d.pending[id]; dup || id == "" {
 		return ui.VulnChallenge{}, errors.New("begin decision: executor returned a reused challenge")
 	}
+	// Another begin may have filled the pool while the executor was asked;
+	// the challenge of this begin is then dropped (the executor expires it).
 	if len(d.pending) >= maxVulnDecisionChallenges {
 		return ui.VulnChallenge{}, errVulnDecisionChallengeFull
 	}
@@ -116,6 +119,28 @@ func (d *vulnDecider) BeginVulnDecision(ctx context.Context, user string, dec ui
 
 // errVulnDecisionChallengeFull: too many begun decisions.
 var errVulnDecisionChallengeFull = errors.New("too many vulnerability decisions in progress")
+
+// reserve reports errVulnDecisionChallengeFull when the pool of begun
+// decisions has no room, after the expired ones are dropped.
+func (d *vulnDecider) reserve() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.pruneLocked(d.now())
+	if len(d.pending) >= maxVulnDecisionChallenges {
+		return errVulnDecisionChallengeFull
+	}
+	return nil
+}
+
+// pruneLocked drops the begun decisions that have expired at now. d.mu must
+// be held.
+func (d *vulnDecider) pruneLocked(now time.Time) {
+	for k, p := range d.pending {
+		if !now.Before(p.expires) {
+			delete(d.pending, k)
+		}
+	}
+}
 
 // take removes challenge id and reports whether it was begun by user for
 // the decision with digest and has not expired. It is removed in every case.
@@ -170,7 +195,9 @@ func (d *vulnDecider) refused(user, reason string) {
 }
 
 // apply writes the decision of the kind it names through the vulnstore
-// method of that kind, with the maintainer user as the actor.
+// method of that kind, with the maintainer user as the actor. The approver
+// of accept_risk is that maintainer too: the name the browser sent is part
+// of the digest the maintainer asserted, but it is not trusted as the actor.
 func (d *vulnDecider) apply(ctx context.Context, user string, dec ui.VulnDecision) error {
 	switch dec.Kind {
 	case ui.VulnAcceptRisk:
@@ -178,7 +205,7 @@ func (d *vulnDecider) apply(ctx context.Context, user string, dec ui.VulnDecisio
 		if err != nil {
 			return err
 		}
-		return d.v.store.SetAcceptedRisk(ctx, dec.Key, vulnstore.AcceptRisk{Approver: dec.Approver, Reason: dec.Reason,
+		return d.v.store.SetAcceptedRisk(ctx, dec.Key, vulnstore.AcceptRisk{Approver: user, Reason: dec.Reason,
 			Expires: dec.Expires, BasisVersion: basis}, d.audit)
 	case ui.VulnFalsePositive:
 		basis, err := d.basis(ctx, dec.Key)
