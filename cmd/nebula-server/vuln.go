@@ -474,10 +474,22 @@ func (v *vulnService) sweepOnce(ctx context.Context) (vulnstore.PruneResult, err
 	if serr := v.sweepSnapshots(sctx); serr != nil {
 		v.log.Error("vulnerability inventory: prune snapshots", "error", serr)
 	}
-	reopened, rerr := v.store.ReviewHumanStates(sctx, v.humanBasis)
+	// basisErr records the findings whose basis could not be judged because
+	// the classifier failed, so the log tells a failed read apart from a
+	// component NOS really does not know.
+	basisErr := map[vulnfinding.Key]bool{}
+	basis := func(ctx context.Context, f vulnstore.Finding) (string, bool, error) {
+		ver, known, berr := v.humanBasis(ctx, f)
+		if berr != nil {
+			basisErr[f.Key] = true
+		}
+		return ver, known, berr
+	}
+	reopened, rerr := v.store.ReviewHumanStates(sctx, basis)
 	cancel()
 	for _, r := range reopened {
-		v.log.Info("vulnerability human state re-opened", "finding_key", r.Key.String(), "reason", string(r.Reason))
+		v.log.Info("vulnerability human state re-opened", "finding_key", r.Key.String(), "reason", string(r.Reason),
+			"basis_error", basisErr[r.Key])
 	}
 	if rerr != nil {
 		v.log.Error("vulnerability store: review human states", "error", rerr, "reopened", len(reopened))
@@ -494,10 +506,14 @@ func (v *vulnService) sweepOnce(ctx context.Context) (vulnstore.PruneResult, err
 
 // humanBasis is the vulnstore.BasisFunc of the human-state review: NOS's
 // current version basis of the finding's component, from the same
-// assessment the classification and the decisions use (assessFinding). known
-// is false when NOS cannot judge the component.
+// classification the decisions use. known is false when NOS cannot judge the
+// component. A classifier failure is returned as err, not as an unknown
+// component.
 func (v *vulnService) humanBasis(ctx context.Context, f vulnstore.Finding) (string, bool, error) {
-	a := v.assessFinding(ctx, f)
+	a, err := v.classifier.assess(ctx, f)
+	if err != nil {
+		return "", false, fmt.Errorf("judge basis of %s: %w", f.Subject.String(), err)
+	}
 	return a.nosVersion, a.nosVersion != "", nil
 }
 
