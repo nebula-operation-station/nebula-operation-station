@@ -571,17 +571,29 @@ func (s *Service) storeLeaseRun(ctx context.Context, grantID string, a actions.A
 // storeLeaseJob records a durable fim.scan read of a lease that the executor
 // started. Its execution and host are running, with no finish time and no
 // class, until collectLeaseJobs stores the job's outcome and sets the
-// execution's final state and finish time in one update. Resume leaves such
-// executions to collectLeaseJobs (see leaseJobRule).
+// execution's final state and finish time (see finishLeaseJob). The execution
+// and its host are written in one transaction: either both rows exist or
+// neither does, so no running execution is left without its host row.
+// Resume leaves such executions to collectLeaseJobs (see leaseJobRule).
 func (s *Service) storeLeaseJob(ctx context.Context, grantID string, a actions.Action, t canonical.Target, ref string, params []byte, id string) {
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO executions (id, digest, action_id, module_version, artifact_sha256, risk, requirement, state,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		s.log.Error("store read lease job", "grant", grantID, "error", err.Error())
+		return
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.ExecContext(ctx, `INSERT INTO executions (id, digest, action_id, module_version, artifact_sha256, risk, requirement, state,
 			durable, timeout_s, created_by, created_at, params, schedule_id) VALUES (?, '', ?, ?, ?, 'LOW', ?, 'running', 1, ?, ?, ?, ?, ?)`,
 		id, a.ID, a.Version, a.SHA256(), leaseRunRequirement, int64(a.Timeout/time.Second), "schedule", s.now().Unix(), string(params), grantID); err != nil {
 		s.log.Error("store read lease job", "grant", grantID, "error", err.Error())
 		return
 	}
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO execution_hosts (execution_id, host_id, fingerprint, credential_ref, endpoints, state, started_at)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO execution_hosts (execution_id, host_id, fingerprint, credential_ref, endpoints, state, started_at)
 		VALUES (?, ?, ?, ?, '[]', 'running', ?)`, id, t.HostID, t.HostKeyFingerprint, ref, s.now().Unix()); err != nil {
+		s.log.Error("store read lease job", "grant", grantID, "error", err.Error())
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		s.log.Error("store read lease job", "grant", grantID, "error", err.Error())
 		return
 	}
@@ -632,8 +644,7 @@ func (s *Service) collectLeaseJobs(ctx context.Context) error {
 		cancel()
 		switch {
 		case status.Code(err) == codes.NotFound:
-			s.finishHost(j.id, j.action, j.host, "unknown", "the executor has no record of this run", -1, nil, nil, false)
-			s.finishLeaseExecution(ctx, j.id)
+			s.finishLeaseJob(ctx, j.id, j.action, j.host, "unknown", "the executor has no record of this run", -1, nil, nil, false)
 			continue
 		case err != nil:
 			s.log.Warn("read lease job", "execution", j.id, "host", j.host, "error", refusal(err))
@@ -642,8 +653,10 @@ func (s *Service) collectLeaseJobs(ctx context.Context) error {
 			continue
 		}
 		st := r.GetRun()
-		s.finishHost(j.id, j.action, j.host, st.GetClass(), st.GetDetail(), int(st.GetExitCode()), st.GetResult(), st.GetLog(), st.GetLogTruncated())
-		s.finishLeaseExecution(ctx, j.id)
+		if !s.finishLeaseJob(ctx, j.id, j.action, j.host, st.GetClass(), st.GetDetail(), int(st.GetExitCode()), st.GetResult(), st.GetLog(), st.GetLogTruncated()) {
+			// Not stored: the executor keeps the result, and the next tick reads it again.
+			continue
+		}
 		cctx, cancel = context.WithTimeout(ctx, callTimeout)
 		if _, err := s.exec.GetRun(cctx, &pb.GetRunRequest{ExecutionId: j.id, HostId: j.host, Release: true}); err != nil {
 			s.log.Warn("release read lease job", "execution", j.id, "host", j.host, "error", refusal(err))
@@ -653,14 +666,35 @@ func (s *Service) collectLeaseJobs(ctx context.Context) error {
 	return nil
 }
 
-// finishLeaseExecution sets the final state and the finish time of a lease
-// execution once its job has been collected, in one update. The state is set
-// here too, so a row stored as finished without a finish time by an earlier
-// version is completed the same way.
-func (s *Service) finishLeaseExecution(ctx context.Context, id string) {
-	if _, err := s.db.ExecContext(ctx, `UPDATE executions SET state = 'finished', finished_at = ? WHERE id = ? AND finished_at IS NULL`, s.now().Unix(), id); err != nil {
-		s.log.Error("finish read lease job", "execution", id, "error", err.Error())
+// finishLeaseJob stores the collected outcome of a lease job: the host's outcome
+// and the execution's final state and finish time, in one transaction, so that
+// a host is never finished while its execution runs, nor the reverse. The
+// finish time is read once for both. The state is set too, so a row that an
+// earlier version stored as finished without a finish time is completed the
+// same way. It reports whether the outcome was stored; if not, the job stays
+// running and the next tick collects it again.
+func (s *Service) finishLeaseJob(ctx context.Context, id, actionID, host, class, detail string, exit int, result, log []byte, truncated bool) bool {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		s.log.Error("finish read lease job", "execution", id, "host", host, "error", err.Error())
+		return false
 	}
+	defer tx.Rollback() //nolint:errcheck
+	fin := s.now()
+	if err := writeHostFinish(ctx, tx, fin, id, host, class, detail, exit, result, log, truncated); err != nil {
+		s.log.Error("finish read lease job", "execution", id, "host", host, "error", err.Error())
+		return false
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE executions SET state = 'finished', finished_at = ? WHERE id = ? AND finished_at IS NULL`, fin.Unix(), id); err != nil {
+		s.log.Error("finish read lease job", "execution", id, "host", host, "error", err.Error())
+		return false
+	}
+	if err := tx.Commit(); err != nil {
+		s.log.Error("finish read lease job", "execution", id, "host", host, "error", err.Error())
+		return false
+	}
+	s.hostFinished(id, actionID, host, class, exit, result, fin)
+	return true
 }
 
 // fimScanLastRuns returns, per host, the start of the newest fim.scan run with
