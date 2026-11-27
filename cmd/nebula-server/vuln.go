@@ -435,9 +435,8 @@ func (v *vulnService) runNotify(ctx context.Context, interval time.Duration) {
 }
 
 // runSweeps calls vulnstore.ResumeCompleting once at startup and then
-// vulnstore.Prune every interval (which runs ResumeCompleting and
-// AbortExpiredRuns before the retention), each bounded by
-// vulnSweepTimeout. Errors are logged and retried at the next interval.
+// sweepOnce every interval, each bounded by vulnSweepTimeout. Errors are
+// logged and retried at the next interval.
 func (v *vulnService) runSweeps(ctx context.Context, interval time.Duration) {
 	sctx, cancel := context.WithTimeout(ctx, vulnSweepTimeout)
 	n, err := v.store.ResumeCompleting(sctx)
@@ -455,25 +454,51 @@ func (v *vulnService) runSweeps(ctx context.Context, interval time.Duration) {
 			return
 		case <-t.C:
 		}
-		sctx, cancel := context.WithTimeout(ctx, vulnSweepTimeout)
-		res, err := v.store.Prune(sctx)
-		// Snapshots are pruned after the findings. This sweep deletes no
-		// inventory read, so no snapshot is left pointing at a deleted read.
-		if serr := v.sweepSnapshots(sctx); serr != nil {
-			v.log.Error("vulnerability inventory: prune snapshots", "error", serr)
-		}
-		cancel()
-		attrs := []any{"resumed", res.ResumedRuns, "aborted", res.AbortedRuns, "deleted_findings", res.DeletedFindings,
-			"cleared_assessment", res.ClearedAssessment, "deleted_runs", res.DeletedRuns, "deleted_history", res.DeletedHistory}
-		if err != nil {
-			v.log.Error("vulnerability store: sweep", append(attrs, "error", err)...)
-		} else if res != (vulnstore.PruneResult{}) {
-			v.log.Info("vulnerability store: sweep", attrs...)
-		}
+		res, err := v.sweepOnce(ctx)
 		if v.swept != nil {
 			v.swept(res, err)
 		}
 	}
+}
+
+// sweepOnce is one sweep, bounded by vulnSweepTimeout: vulnstore.Prune
+// (which resumes and aborts runs before the retention), the snapshot prune,
+// and the re-check of the human states (ADR 0011 D6) against NOS's own
+// version basis (humanBasis). The re-opened states are logged. It returns
+// the prune result and the first error.
+func (v *vulnService) sweepOnce(ctx context.Context) (vulnstore.PruneResult, error) {
+	sctx, cancel := context.WithTimeout(ctx, vulnSweepTimeout)
+	res, err := v.store.Prune(sctx)
+	// Snapshots are pruned after the findings. This sweep deletes no
+	// inventory read, so no snapshot is left pointing at a deleted read.
+	if serr := v.sweepSnapshots(sctx); serr != nil {
+		v.log.Error("vulnerability inventory: prune snapshots", "error", serr)
+	}
+	reopened, rerr := v.store.ReviewHumanStates(sctx, v.humanBasis)
+	cancel()
+	for _, r := range reopened {
+		v.log.Info("vulnerability human state re-opened", "finding_key", r.Key.String(), "reason", string(r.Reason))
+	}
+	if rerr != nil {
+		v.log.Error("vulnerability store: review human states", "error", rerr, "reopened", len(reopened))
+	}
+	attrs := []any{"resumed", res.ResumedRuns, "aborted", res.AbortedRuns, "deleted_findings", res.DeletedFindings,
+		"cleared_assessment", res.ClearedAssessment, "deleted_runs", res.DeletedRuns, "deleted_history", res.DeletedHistory}
+	if err != nil {
+		v.log.Error("vulnerability store: sweep", append(attrs, "error", err)...)
+	} else if res != (vulnstore.PruneResult{}) {
+		v.log.Info("vulnerability store: sweep", attrs...)
+	}
+	return res, err
+}
+
+// humanBasis is the vulnstore.BasisFunc of the human-state review: NOS's
+// current version basis of the finding's component, from the same
+// assessment the classification and the decisions use (assessFinding). known
+// is false when NOS cannot judge the component.
+func (v *vulnService) humanBasis(ctx context.Context, f vulnstore.Finding) (string, bool, error) {
+	a := v.assessFinding(ctx, f)
+	return a.nosVersion, a.nosVersion != "", nil
 }
 
 // vulnAPIStore is the store behind the agent API: it passes every call to
