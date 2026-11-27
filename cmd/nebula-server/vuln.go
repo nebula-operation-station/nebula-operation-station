@@ -561,14 +561,16 @@ func vulnAdmin(status ui.StatusProvider) func(ctx context.Context) bool {
 	}
 }
 
-// errVulnDecisionsUnavailable: the executor has no RPC yet that binds a
-// WebAuthn assertion to a vulnerability decision digest (Q4).
-var errVulnDecisionsUnavailable = errors.New("vulnerability decisions need an executor-verified security key assertion, which this executor does not offer")
+// errVulnDecisionsUnavailable: no decision backend is wired (fail closed);
+// the server's wiring always sets one (vuln_decide.go).
+var errVulnDecisionsUnavailable = errors.New("vulnerability decisions are not wired on this server")
 
-// vulnPages is the backend of the findings pages over the real store.
+// vulnPages is the backend of the findings pages over the real store, and
+// of the maintainer decisions (dec, vuln_decide.go).
 type vulnPages struct {
 	v     *vulnService
 	admin func(ctx context.Context) bool
+	dec   *vulnDecider
 }
 
 func (p vulnPages) feeds(ctx context.Context) ([]ui.VulnFeedStatus, error) {
@@ -796,14 +798,22 @@ func (p vulnPages) VulnMaintainer(ctx context.Context, _ string) (bool, error) {
 	return p.admin(ctx), nil
 }
 
-// BeginVulnDecision refuses: see errVulnDecisionsUnavailable.
-func (p vulnPages) BeginVulnDecision(context.Context, string, ui.VulnDecision) (ui.VulnChallenge, error) {
-	return ui.VulnChallenge{}, errVulnDecisionsUnavailable
+// BeginVulnDecision starts the security key challenge of a decision (Q4,
+// variant A; vuln_decide.go).
+func (p vulnPages) BeginVulnDecision(ctx context.Context, user string, d ui.VulnDecision) (ui.VulnChallenge, error) {
+	if p.dec == nil {
+		return ui.VulnChallenge{}, errVulnDecisionsUnavailable
+	}
+	return p.dec.BeginVulnDecision(ctx, user, d)
 }
 
-// CommitVulnDecision refuses: see errVulnDecisionsUnavailable.
-func (p vulnPages) CommitVulnDecision(context.Context, string, string, ui.VulnDecision, []byte) error {
-	return errVulnDecisionsUnavailable
+// CommitVulnDecision verifies the assertion and applies the decision
+// (vuln_decide.go).
+func (p vulnPages) CommitVulnDecision(ctx context.Context, user, challengeID string, d ui.VulnDecision, assertion []byte) error {
+	if p.dec == nil {
+		return errVulnDecisionsUnavailable
+	}
+	return p.dec.CommitVulnDecision(ctx, user, challengeID, d, assertion)
 }
 
 // vulnExportPath serves the admin export (ADR 0011 D9).
