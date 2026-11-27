@@ -173,6 +173,35 @@ func (l *lazyExecutor) CommitPVEGuestProvision(ctx context.Context, in *pb.Commi
 	return nil, errNotConnected
 }
 
+// ProposePVEImagePrepare passes an image preparation proposal through (ADR
+// 0008 amendment 2, PV-03g). The executor resolves the catalog image and sets
+// the risk; the approval stays with the user.
+func (l *lazyExecutor) ProposePVEImagePrepare(ctx context.Context, in *pb.ProposePVEImagePrepareRequest, opts ...grpc.CallOption) (*pb.ProposePVEImagePrepareResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.ProposePVEImagePrepare(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+// CommitPVEImagePrepare passes the run of an approved image preparation
+// through; the executor requires the approved permit. The server never
+// approves: see commitImagePrepare for the check it makes before sending.
+func (l *lazyExecutor) CommitPVEImagePrepare(ctx context.Context, in *pb.CommitPVEImagePrepareRequest, opts ...grpc.CallOption) (*pb.CommitPVEImagePrepareResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.CommitPVEImagePrepare(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+// ListPVEImages passes the image catalog and template read through
+// (read-only).
+func (l *lazyExecutor) ListPVEImages(ctx context.Context, in *pb.ListPVEImagesRequest, opts ...grpc.CallOption) (*pb.ListPVEImagesResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.ListPVEImages(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
 // ProposePVEGuestPower passes a typed guest power proposal through (ADR
 // 0006 P2-01; the chart's Power section is its caller). The executor binds
 // the guest and sets the risk.
