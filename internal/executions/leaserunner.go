@@ -569,13 +569,13 @@ func (s *Service) storeLeaseRun(ctx context.Context, grantID string, a actions.A
 }
 
 // storeLeaseJob records a durable fim.scan read of a lease that the executor
-// started. Its host is running and has no class until collectLeaseJobs stores
-// the job's outcome. The execution keeps state 'finished' with no finish time
-// until then: Resume restarts every execution in state 'running' through the
-// execution dispatcher, which must never see a lease run.
+// started. Its execution and host are running, with no finish time and no
+// class, until collectLeaseJobs stores the job's outcome and sets the
+// execution's final state and finish time in one update. Resume leaves such
+// executions to collectLeaseJobs (see leaseJobRule).
 func (s *Service) storeLeaseJob(ctx context.Context, grantID string, a actions.Action, t canonical.Target, ref string, params []byte, id string) {
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO executions (id, digest, action_id, module_version, artifact_sha256, risk, requirement, state,
-			durable, timeout_s, created_by, created_at, params, schedule_id) VALUES (?, '', ?, ?, ?, 'LOW', ?, 'finished', 1, ?, ?, ?, ?, ?)`,
+			durable, timeout_s, created_by, created_at, params, schedule_id) VALUES (?, '', ?, ?, ?, 'LOW', ?, 'running', 1, ?, ?, ?, ?, ?)`,
 		id, a.ID, a.Version, a.SHA256(), leaseRunRequirement, int64(a.Timeout/time.Second), "schedule", s.now().Unix(), string(params), grantID); err != nil {
 		s.log.Error("store read lease job", "grant", grantID, "error", err.Error())
 		return
@@ -590,6 +590,12 @@ func (s *Service) storeLeaseJob(ctx context.Context, grantID string, a actions.A
 
 // leaseJobsPerTick bounds the durable lease jobs one tick collects.
 const leaseJobsPerTick = 64
+
+// leaseJobRule is the condition that marks an executions row as a durable
+// lease job, on unqualified columns; its one argument is leaseRunRequirement.
+// collectLeaseJobs applies the same rule to the alias e, and Resume excludes
+// the rows it matches so that the dispatcher never restarts them.
+const leaseJobRule = `durable = 1 AND schedule_id != '' AND requirement = ?`
 
 // collectLeaseJobs reads the outcome of the lease jobs stored as running. A
 // job that has ended is stored with its class, exit code, result and log, and
@@ -647,10 +653,12 @@ func (s *Service) collectLeaseJobs(ctx context.Context) error {
 	return nil
 }
 
-// finishLeaseExecution sets the finish time of a lease execution once its job
-// has been collected.
+// finishLeaseExecution sets the final state and the finish time of a lease
+// execution once its job has been collected, in one update. The state is set
+// here too, so a row stored as finished without a finish time by an earlier
+// version is completed the same way.
 func (s *Service) finishLeaseExecution(ctx context.Context, id string) {
-	if _, err := s.db.ExecContext(ctx, `UPDATE executions SET finished_at = ? WHERE id = ? AND finished_at IS NULL`, s.now().Unix(), id); err != nil {
+	if _, err := s.db.ExecContext(ctx, `UPDATE executions SET state = 'finished', finished_at = ? WHERE id = ? AND finished_at IS NULL`, s.now().Unix(), id); err != nil {
 		s.log.Error("finish read lease job", "execution", id, "error", err.Error())
 	}
 }

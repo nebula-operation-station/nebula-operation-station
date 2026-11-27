@@ -558,3 +558,99 @@ func TestStartedManualFullRunMovesTheFloor(t *testing.T) {
 		})
 	}
 }
+
+// TestFimScanLeaseRunIsRunningWhileItsJobRuns checks that the execution of a
+// dispatched fim.scan job is running, not finished, while the job runs: no
+// execution is ever finished without a finish time.
+func TestFimScanLeaseRunIsRunningWhileItsJobRuns(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	s, f := setupLeases(t, &now, func(n time.Time) *pb.ReadGrant {
+		return leaseEntry(t, fimLeaseDoc(t, n, []string{"web"}, "full"), n)
+	})
+	jf := &jobFake{leaseRunFake: f}
+	s.exec = jf
+	ctx := context.Background()
+
+	s.RunDueReadGrants(ctx)
+	if len(f.runs) != 1 {
+		t.Fatalf("%d runs, want 1 fim.scan run", len(f.runs))
+	}
+	var state string
+	var finished sql.NullInt64
+	if err := s.db.QueryRow(`SELECT state, finished_at FROM executions WHERE action_id = ? AND schedule_id = ?`,
+		permit.FimScanActionID, testGrantID).Scan(&state, &finished); err != nil {
+		t.Fatal(err)
+	}
+	if state != "running" || finished.Valid {
+		t.Fatalf("while the job runs: execution state %q finished %v; want running, unfinished", state, finished)
+	}
+	var bad int
+	if err := s.db.QueryRow(`SELECT count(*) FROM executions WHERE state = 'finished' AND finished_at IS NULL`).Scan(&bad); err != nil {
+		t.Fatal(err)
+	}
+	if bad != 0 {
+		t.Fatalf("%d executions are finished without a finish time", bad)
+	}
+}
+
+// TestFimScanLeaseRunIsFinalWhenItsJobIsCollected checks that collecting the
+// job's outcome sets the execution's final state and its finish time.
+func TestFimScanLeaseRunIsFinalWhenItsJobIsCollected(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	s, f := setupLeases(t, &now, func(n time.Time) *pb.ReadGrant {
+		return leaseEntry(t, fimLeaseDoc(t, n, []string{"web"}, "full"), n)
+	})
+	jf := &jobFake{leaseRunFake: f}
+	s.exec = jf
+	ctx := context.Background()
+
+	s.RunDueReadGrants(ctx)
+	jf.final = &pb.RunStatus{State: "finished", Class: "success", Result: []byte(`{"ok":true}`)}
+	now = now.Add(time.Hour)
+	s.RunDueReadGrants(ctx)
+
+	var state string
+	var finished sql.NullInt64
+	if err := s.db.QueryRow(`SELECT state, finished_at FROM executions WHERE action_id = ? AND schedule_id = ?`,
+		permit.FimScanActionID, testGrantID).Scan(&state, &finished); err != nil {
+		t.Fatal(err)
+	}
+	if state != "finished" || !finished.Valid || finished.Int64 != now.Unix() {
+		t.Fatalf("after collection: execution state %q finished %v; want finished at %d", state, finished, now.Unix())
+	}
+	if !jf.released {
+		t.Fatal("the job's result was not released on the executor after collection")
+	}
+}
+
+// TestFimScanDueCheckCountsADispatchedJobAsStarted checks that a fim.scan job
+// the executor started, still running, moves the host's floor: the due check
+// must not propose the same run again while the job runs.
+func TestFimScanDueCheckCountsADispatchedJobAsStarted(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	s, f := setupLeases(t, &now, func(n time.Time) *pb.ReadGrant {
+		return leaseEntry(t, fimLeaseDoc(t, n, []string{"web"}, "full"), n)
+	})
+	jf := &jobFake{leaseRunFake: f}
+	s.exec = jf
+	ctx := context.Background()
+
+	s.RunDueReadGrants(ctx)
+	started := now
+	now = now.Add(time.Hour)
+	s.RunDueReadGrants(ctx)
+	if len(f.runs) != 1 {
+		t.Fatalf("%d runs, want 1: the running job must not be proposed again", len(f.runs))
+	}
+	canon, _, ok := fimScanModeParams("full")
+	if !ok {
+		t.Fatal(`no fim.scan mode "full"`)
+	}
+	last, err := s.fimScanLastRuns(ctx, canon)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if at, ok := last["web"]; !ok || !at.Equal(started) {
+		t.Fatalf("last full run on web %v (present %v), want %v", at, ok, started)
+	}
+}

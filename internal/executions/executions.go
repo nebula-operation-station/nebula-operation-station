@@ -625,13 +625,14 @@ func (s *Service) ExpirePending(ctx context.Context, now time.Time) (int, error)
 // Resume restarts the dispatchers of executions that were approved or
 // running when the server stopped. Attached runs that were in flight have
 // an unknown outcome on the server side; the executor never re-runs them.
+// Durable lease jobs are not restarted: collectLeaseJobs reads their outcome.
 func (s *Service) Resume(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `UPDATE execution_hosts SET state = 'finished', class = 'unknown',
 			detail = 'the server restarted during an attached run; see the executor log', finished_at = ?
 		WHERE state = 'running' AND execution_id IN (SELECT id FROM executions WHERE durable = 0)`, s.now().Unix()); err != nil {
 		return err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM executions WHERE state IN ('approved', 'running')`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM executions WHERE state IN ('approved', 'running') AND NOT (`+leaseJobRule+`)`, leaseRunRequirement)
 	if err != nil {
 		return err
 	}
