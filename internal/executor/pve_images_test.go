@@ -388,8 +388,8 @@ func TestImageCatalogLocalEntryCannotShadowSigned(t *testing.T) {
 	if err := e.imgs.Catalog.AddLocal(release.Image{ID: "local-x", OS: "x", Release: "1", Arch: "amd64", URL: "http://insecure.example/x.qcow2", SHA256: imgLocalSHA, DiskFormat: "qcow2"}); !errors.Is(err, release.ErrFormat) {
 		t.Fatalf("local http entry: %v", err)
 	}
-	if !e.imgs.Catalog.RemoveLocal(imgLocalID) {
-		t.Fatal("remove local")
+	if removed, err := e.imgs.Catalog.RemoveLocal(imgLocalID); err != nil || !removed {
+		t.Fatalf("remove local: %v %v", removed, err)
 	}
 	if _, _, err := e.imgs.ProposalRequest(context.Background(), prepareReq(imgLocalID, 9000), "00000000-0000-4000-b000-999999999999", canonical.RiskHigh,
 		strings.Repeat("c", 64), time.Now().Add(time.Hour)); !errors.Is(err, ErrPveImageUnknown) {
