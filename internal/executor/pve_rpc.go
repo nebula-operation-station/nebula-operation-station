@@ -9,11 +9,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/netip"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc/codes"
@@ -22,9 +24,11 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveapi"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/release"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vault"
@@ -1315,4 +1319,207 @@ func (s *Service) CommitPVEGuestProvision(ctx context.Context, in *pb.CommitPVEG
 		out.Steps = append(out.Steps, &pb.PVEGuestPowerStep{State: string(st.State), Upid: st.UPID, TaskType: st.TaskType})
 	}
 	return out, nil
+}
+
+// Image preparation RPC bounds (pve.image.prepare, ADR 0008 PV-03, D1 (a)).
+const (
+	// pveImagePrepareLifetime is how long a proposed image preparation
+	// permit can be approved and run.
+	pveImagePrepareLifetime = 30 * time.Minute
+	// maxPveImageSpecField bounds every text field of a PVEImagePrepareSpec
+	// before anything is looked up.
+	maxPveImageSpecField = 255
+)
+
+// pveImagePrepareStagePlan is the stage plan hash of an image preparation
+// (one node, the fixed step plan in the parameters).
+var pveImagePrepareStagePlan = func() string {
+	s, _ := canonical.HashParameters([]byte(`{"plan":"pve-image-prepare-v1"}`))
+	return s
+}()
+
+// errPveImageSpec is returned for a missing or malformed
+// PVEImagePrepareSpec; nothing is looked up or proposed.
+var errPveImageSpec = errors.New("executor: malformed image preparation spec")
+
+// imagePrepareRequestFromProto converts and bounds a PVEImagePrepareSpec.
+// The catalog lookup, the VMID range and the remote and node checks are
+// those of PveImages and PveMutations.
+func imagePrepareRequestFromProto(in *pb.PVEImagePrepareSpec) (PveImagePrepareRequest, error) {
+	if in == nil {
+		return PveImagePrepareRequest{}, errPveImageSpec
+	}
+	for _, f := range []string{in.GetRemoteId(), in.GetNode(), in.GetStorage(), in.GetImageId(), in.GetImportStorage()} {
+		if f == "" || len(f) > maxPveImageSpecField || !utf8.ValidString(f) {
+			return PveImagePrepareRequest{}, errPveImageSpec
+		}
+	}
+	if !pvecontract.ValidNodeName(in.GetNode()) {
+		return PveImagePrepareRequest{}, errPveImageSpec
+	}
+	return PveImagePrepareRequest{
+		PveTemplateKey: PveTemplateKey{RemoteID: in.GetRemoteId(), Node: in.GetNode(), Storage: in.GetStorage(), ImageID: in.GetImageId()},
+		ImportStorage:  in.GetImportStorage(), VMID: in.GetVmid(),
+	}, nil
+}
+
+// pveImagePrepareRPCError maps image preparation errors to fixed status
+// texts; no remote text reaches the caller.
+func pveImagePrepareRPCError(err error) error {
+	switch {
+	case permit.CodeOf(err) != "":
+		return toStatus(err)
+	case errors.Is(err, errPveImageSpec), errors.Is(err, ErrPveMutationPlan), errors.Is(err, ErrPveMutationRequest):
+		return status.Error(codes.InvalidArgument, "pve image prepare: invalid spec, storage or vmid")
+	case errors.Is(err, ErrPveImageUnknown):
+		return status.Error(codes.NotFound, "pve image prepare: the image is not in the catalog")
+	case errors.Is(err, ErrPveImagePrepared):
+		return status.Error(codes.AlreadyExists, "pve image prepare: the image is already prepared on this storage")
+	case errors.Is(err, ErrPveTemplateUnreadable):
+		return status.Error(codes.Unavailable, "pve image prepare: the prepared template could not be read; nothing was proposed or recorded")
+	case errors.Is(err, ErrPveTemplateNotPrepared), errors.Is(err, ErrPveTemplateChanged):
+		return status.Error(codes.FailedPrecondition, "pve image prepare: the template is gone or changed")
+	case errors.Is(err, ErrPveTemplateStore), errors.Is(err, ErrPveJobStore):
+		return status.Error(codes.Unavailable, "pve image prepare: the template or job records are unavailable")
+	case errors.Is(err, ErrPveRunExpired):
+		return status.Error(codes.DeadlineExceeded, "pve image prepare: the run ended before the next step was sent")
+	case errors.Is(err, ErrPveStepFailed), errors.Is(err, ErrPveStepRunning), errors.Is(err, ErrPveDispatchUncertain):
+		return status.Error(codes.Aborted, "pve image prepare: a step failed or did not finish; no template was recorded")
+	case errors.Is(err, ErrPveTargetChanged), errors.Is(err, ErrPveRemoteChanged):
+		return status.Error(codes.FailedPrecondition, "pve image prepare: the node, storage or remote changed; propose again")
+	case errors.Is(err, ErrPveReadOnly):
+		return status.Error(codes.FailedPrecondition, "pve image prepare: the remote has no action credential")
+	case errors.Is(err, ErrPveTargetBusy):
+		return status.Error(codes.Unavailable, "pve image prepare: another mutation of the node is in progress")
+	case errors.Is(err, ErrPveMutationDenied), errors.Is(err, ErrPvePermitFinal), errors.Is(err, ErrPveMutationAlreadyRun):
+		return status.Error(codes.PermissionDenied, "pve image prepare: no approved permit covers this preparation")
+	case errors.Is(err, vault.ErrLocked):
+		return status.Error(codes.FailedPrecondition, "pve image prepare requires an unlocked vault")
+	case errors.Is(err, executordb.ErrRemoteNotFound):
+		return status.Error(codes.NotFound, "pve remote not found")
+	default:
+		return status.Error(codes.Internal, "pve image prepare failed")
+	}
+}
+
+// pveImageToProto converts a resolved catalog entry.
+func pveImageToProto(img PveImage) *pb.PVEImage {
+	return &pb.PVEImage{
+		Image: &pb.PVECatalogImage{Id: img.ID, Os: img.OS, Release: img.Release, Arch: img.Arch, Url: img.URL, Sha256: img.SHA256, DiskFormat: img.DiskFormat},
+		Trust: string(img.Trust), CatalogSequence: img.CatalogSequence, CatalogDigest: img.CatalogDigest,
+	}
+}
+
+// ProposePVEImagePrepare proposes one pve.image.prepare (ADR 0008 PV-03,
+// D1 (a); roles server and admin, checked by the role table and again
+// here). The executor resolves the image in its catalog, refuses an image
+// whose template is still valid (D5) and registers the permit at least
+// HIGH (ImagePrepareRisk); the caller's input cannot lower it. The server
+// can propose but never approve: approval needs the user's assertion or
+// the CLI.
+func (s *Service) ProposePVEImagePrepare(ctx context.Context, in *pb.ProposePVEImagePrepareRequest) (*pb.ProposePVEImagePrepareResponse, error) {
+	if !pveCallerHasRole(ctx, peercred.RoleServer, peercred.RoleAdmin) {
+		return nil, status.Error(codes.PermissionDenied, "pve image prepare: server or admin role required")
+	}
+	req, err := imagePrepareRequestFromProto(in.GetSpec())
+	if err != nil {
+		return nil, pveImagePrepareRPCError(err)
+	}
+	_, imgs, err := s.pveImageCatalog()
+	if err != nil {
+		return nil, err
+	}
+	if err := s.checkPveTrustFence("pve image prepare", req.RemoteID); err != nil {
+		return nil, err
+	}
+	id, err := newExecutionID()
+	if err != nil {
+		return nil, status.Error(codes.Internal, "execution id")
+	}
+	rq, params, err := imgs.ProposalRequest(ctx, req, id, pveImagePrepareRisk, pveImagePrepareStagePlan, s.clock().Add(pveImagePrepareLifetime))
+	if err != nil {
+		return nil, pveImagePrepareRPCError(err)
+	}
+	// The entry the parameters carry, for the response; Prepare resolves
+	// it again, so a catalog change since the proposal no longer matches
+	// the permit.
+	img, ok := imgs.Catalog.Lookup(req.ImageID)
+	if !ok {
+		return nil, pveImagePrepareRPCError(ErrPveImageUnknown)
+	}
+	res, err := s.auth.ProposeAtLeastMinimum(rq, params)
+	if err != nil {
+		return nil, pveImagePrepareRPCError(err)
+	}
+	out, err := s.permitResponse(res.Permit)
+	if err != nil {
+		return nil, err
+	}
+	s.log.Info("audit", "kind", "pve_image_prepare_proposed", "remote", req.RemoteID, "node", req.Node, "storage", req.Storage,
+		"image", req.ImageID, "trust", string(img.Trust), "vmid", req.VMID, "execution", id,
+		"risk", string(res.Permit.Request.RiskClass), "by", callerName(ctx))
+	return &pb.ProposePVEImagePrepareResponse{Permit: out, Image: pveImageToProto(img)}, nil
+}
+
+// CommitPVEImagePrepare runs an approved pve.image.prepare (roles server
+// and admin) and returns the template record it wrote. It runs only with
+// the permit approved for exactly this spec under the normal approval
+// semantics; Prepare rebuilds the parameters from the current catalog, so
+// a changed spec or catalog entry is refused by the permit.
+func (s *Service) CommitPVEImagePrepare(ctx context.Context, in *pb.CommitPVEImagePrepareRequest) (*pb.CommitPVEImagePrepareResponse, error) {
+	if !pveCallerHasRole(ctx, peercred.RoleServer, peercred.RoleAdmin) {
+		return nil, status.Error(codes.PermissionDenied, "pve image prepare: server or admin role required")
+	}
+	req, err := imagePrepareRequestFromProto(in.GetSpec())
+	if err != nil {
+		return nil, pveImagePrepareRPCError(err)
+	}
+	d, err := canonical.ParseDigest(in.GetExecutionDigest())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "pve image prepare: malformed execution digest")
+	}
+	req.Digest = d
+	_, imgs, err := s.pveImageCatalog()
+	if err != nil {
+		return nil, err
+	}
+	rec, err := imgs.Prepare(ctx, req)
+	if err != nil {
+		return nil, pveImagePrepareRPCError(err)
+	}
+	return &pb.CommitPVEImagePrepareResponse{ExecutionId: rec.ExecutionID, Template: &pb.PVETemplateRecord{
+		RemoteId: rec.RemoteID, Node: rec.Node, Storage: rec.Storage, ImageId: rec.ImageID, Trust: string(rec.Trust),
+		Vmid: rec.VMID, Generation: rec.Generation, SourceSha256: rec.SourceSHA256, ConfigDigest: rec.ConfigDigest,
+		TrustGeneration: rec.TrustGeneration, ExecutionId: rec.ExecutionID, PreparedAtUnix: rec.PreparedAt.Unix(),
+	}}, nil
+}
+
+// LoadPVEImageCatalog reads the signed image catalog and its detached
+// signature (ADR 0008 D2 (a); the executor start calls it with the files
+// of the release bundle and the active release roots of its durable root
+// state) and loads it with PveImageCatalog.LoadSigned. Each input is read
+// up to its limit (release.MaxCatalog, release.MaxSignature). An oversize
+// or malformed input wraps release.ErrFormat, a signature that does not
+// verify release.ErrSignature or release.ErrUntrusted, an older or
+// conflicting catalog ErrPveCatalogRollback and an unusable state (or no
+// state directory) ErrPveCatalogState. On every failure nothing is
+// persisted, the catalog loaded before (if any) stays and an audit line is
+// written; with no signed catalog loaded every signed image is
+// ErrPveImageUnknown, while the local entries stay served.
+func (s *Service) LoadPVEImageCatalog(roots []release.Root, catalog, sig io.Reader) error {
+	cat, _, err := s.pveImageCatalog()
+	if err != nil {
+		err = fmt.Errorf("load image catalog: no state directory: %w", ErrPveCatalogState)
+	} else {
+		err = loadPveCatalogFrom(cat, roots, catalog, sig)
+	}
+	if err != nil {
+		s.log.Warn("audit", "kind", "pve_image_catalog_refused", "reason", pveCatalogRefusal(err))
+		return err
+	}
+	l, err := cat.CatalogListing()
+	if err == nil {
+		s.log.Info("audit", "kind", "pve_image_catalog_loaded", "sequence", l.Sequence, "digest", l.Digest)
+	}
+	return nil
 }

@@ -34,6 +34,9 @@ const pveUsage = `usage: nebula pve remote add <id> --kind cluster|standalone --
        nebula pve remote repin <id> [--ca-file PATH]
        nebula pve remote set-site <id> onsite|offsite
        nebula pve remote list
+       nebula pve image add <local-id> --os OS --release RELEASE --arch amd64|arm64 --url https://... --sha256 HEX --disk-format qcow2|raw
+       nebula pve image remove <local-id>
+       nebula pve image list
 
 Runs as a configured local admin through NEBULA_EXECUTOR_SOCKET.
 Unlock the executor vault with nebula unlock first. Tokens are
@@ -50,7 +53,14 @@ and its fingerprint is the one to type back.
 
 If the executor reports the stored cluster CA as missing or unusable,
 restore it with repin --ca-file and type the unchanged current pin as
-the new fingerprint; pin, generation and grants stay as they are.`
+the new fingerprint; pin, generation and grants stay as they are.
+
+image add|remove manage local image entries (trust local); the id
+must start with "local-". Only the admin role may call them; the
+executor validates the entry (https URL, lowercase hex SHA-256 of the
+image file, qcow2 or raw), stores it in its own state and audits it.
+Both ask for a typed 'yes'. image list shows the signed and local
+entries and the prepared template records.`
 
 // maxPveCAFileBytes bounds the --ca-file (the executor enforces the same).
 const maxPveCAFileBytes = executor.MaxPveCAFileBytes
@@ -167,10 +177,18 @@ func pveAskLine(stdin io.Reader, prompt, what string) (string, error) {
 }
 
 func pveCmd(args []string, stdin io.Reader, ask prompter, w io.Writer) error {
-	if len(args) < 1 || args[0] != "remote" {
+	if len(args) < 1 {
 		return errors.New(strings.TrimSpace(pveUsage))
 	}
-	return pveRemoteCmd(args[1:], bufio.NewReaderSize(stdin, maxPveConfirmationBytes+2), ask, w)
+	br := bufio.NewReaderSize(stdin, maxPveConfirmationBytes+2)
+	switch args[0] {
+	case "remote":
+		return pveRemoteCmd(args[1:], br, ask, w)
+	case "image":
+		// Local image entries (D3 (a)): no secret is asked.
+		return pveImageCmd(args[1:], br, w)
+	}
+	return errors.New(strings.TrimSpace(pveUsage))
 }
 
 func pveRemoteCmd(args []string, stdin io.Reader, ask prompter, w io.Writer) error {

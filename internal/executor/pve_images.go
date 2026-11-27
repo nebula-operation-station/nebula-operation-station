@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"sync"
@@ -233,6 +234,55 @@ func (c *PveImageCatalog) LoadSigned(roots []release.Root, raw, sig []byte) erro
 	}
 	c.signed = &cat
 	return nil
+}
+
+// loadPveCatalogFrom reads the catalog and its signature, each up to its
+// limit, and loads them into c with LoadSigned. Input over a limit wraps
+// release.ErrFormat and is refused before anything is verified or
+// persisted.
+func loadPveCatalogFrom(c *PveImageCatalog, roots []release.Root, catalog, sig io.Reader) error {
+	raw, err := readPveCatalogInput(catalog, release.MaxCatalog)
+	if err != nil {
+		return fmt.Errorf("load image catalog: catalog: %w", err)
+	}
+	sb, err := readPveCatalogInput(sig, release.MaxSignature)
+	if err != nil {
+		return fmt.Errorf("load image catalog: signature: %w", err)
+	}
+	return c.LoadSigned(roots, raw, sb)
+}
+
+// readPveCatalogInput reads r up to limit bytes; empty or longer input
+// wraps release.ErrFormat.
+func readPveCatalogInput(r io.Reader, limit int) ([]byte, error) {
+	if r == nil {
+		return nil, fmt.Errorf("%w: no input", release.ErrFormat)
+	}
+	b, err := io.ReadAll(io.LimitReader(r, int64(limit)+1))
+	if err != nil {
+		return nil, fmt.Errorf("read: %w", err)
+	}
+	if len(b) == 0 || len(b) > limit {
+		return nil, fmt.Errorf("%w: input must be 1 to %d bytes", release.ErrFormat, limit)
+	}
+	return b, nil
+}
+
+// pveCatalogRefusal is the fixed audit reason of a refused catalog; never
+// an error text.
+func pveCatalogRefusal(err error) string {
+	switch {
+	case errors.Is(err, ErrPveCatalogRollback):
+		return "rollback"
+	case errors.Is(err, ErrPveCatalogState):
+		return "state"
+	case errors.Is(err, release.ErrSignature), errors.Is(err, release.ErrUntrusted):
+		return "signature"
+	case errors.Is(err, release.ErrFormat):
+		return "format"
+	default:
+		return "unreadable"
+	}
 }
 
 // AddLocal adds or replaces an operator-defined entry. Its ID must start
