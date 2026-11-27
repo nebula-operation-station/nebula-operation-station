@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/integritystore"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/notifylog"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
@@ -221,6 +222,16 @@ func TestIntegrityTamperOverHourlyLimitIsHeldAndRecorded(t *testing.T) {
 	}
 	if held != 1 {
 		t.Fatalf("recorded %d held messages, want 1", held)
+	}
+}
+
+// TestIntegrityTamperClassIsTheGateSpellingOfTheStoreClass pins the one
+// place where the baseline tamper class is named: the integritystore class
+// with '-' replaced by '_', because the gate accepts only a-z, 0-9 and '_'.
+func TestIntegrityTamperClassIsTheGateSpellingOfTheStoreClass(t *testing.T) {
+	want := strings.ReplaceAll(string(integritystore.ClassBaselineDigestMismatch), "-", "_")
+	if integrityTamperClass != want {
+		t.Fatalf("integrityTamperClass = %q, want %q", integrityTamperClass, want)
 	}
 }
 

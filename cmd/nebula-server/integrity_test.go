@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -17,9 +19,140 @@ import (
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/integrity"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/notifylog"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/release"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/version"
 )
+
+// failingLister is a notification log whose reads fail.
+type failingLister struct{}
+
+func (failingLister) List(context.Context, int64, int) ([]notifylog.Entry, error) {
+	return nil, errors.New("notification log is closed")
+}
+
+// heldStore returns a real notification log in a temporary database.
+func heldStore(t *testing.T) *notifylog.Store {
+	t.Helper()
+	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store, err := notifylog.New(db, time.Now)
+	if err != nil {
+		t.Fatalf("new notification log: %v", err)
+	}
+	return store
+}
+
+// getStatusBody fetches the status page of h over real HTTP with accept.
+func getStatusBody(t *testing.T, h http.Handler, accept string) string {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	req, err := http.NewRequest(http.MethodGet, srv.URL+integrityStatusPath, nil)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	req.Header.Set("Accept", accept)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("get status: %v", err)
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	return string(b)
+}
+
+// heldStatusJSON is the held block of the JSON status page.
+type heldStatusJSON struct {
+	Held *struct {
+		Available bool       `json:"available"`
+		Items     []heldView `json:"items"`
+	} `json:"held_notifications"`
+}
+
+// TestIntegrityStatusShowsHeldIntegrityMessage sends one more tamper message
+// than the hourly limit allows, over real HTTP. The message is held, recorded
+// in the notification log, and listed on /integrity/status in JSON and HTML.
+func TestIntegrityStatusShowsHeldIntegrityMessage(t *testing.T) {
+	sink, n := newNotifySink(t)
+	store := heldStore(t)
+	n.SetRecorder(store)
+	hosts := make([]string, 0, notify.MaxIntegrityPerHour+1)
+	for i := range notify.MaxIntegrityPerHour + 1 {
+		hosts = append(hosts, "web-"+string(rune('a'+i)))
+	}
+	cur := tamperStatus(hosts...)
+	if _, err := syncIntegrityTamper(context.Background(), newTestGate(t, n), fixedReader(&cur), nil, slog.Default()); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if err := n.FlushRecords(context.Background()); err != nil {
+		t.Fatalf("flush records: %v", err)
+	}
+	if sink.count() != notify.MaxIntegrityPerHour {
+		t.Fatalf("sink got %d messages, want %d", sink.count(), notify.MaxIntegrityPerHour)
+	}
+	mux := http.NewServeMux()
+	mountIntegrityStatusHeld(mux, newIntegrityMonitor(slog.New(slog.DiscardHandler), "dev"), nil,
+		slog.New(slog.DiscardHandler), heldLister(store))
+
+	var js heldStatusJSON
+	body := getStatusBody(t, mux, "application/json")
+	if err := json.Unmarshal([]byte(body), &js); err != nil {
+		t.Fatalf("status JSON: %v", err)
+	}
+	if js.Held == nil || !js.Held.Available {
+		t.Fatalf("held block missing or unavailable: %s", body)
+	}
+	if len(js.Held.Items) != 1 {
+		t.Fatalf("held items = %d, want 1: %s", len(js.Held.Items), body)
+	}
+	it := js.Held.Items[0]
+	if it.Kind != string(notify.IntegrityBaselineTamper) || it.Host != "web-k" {
+		t.Fatalf("held item = %+v, want kind %s on web-k", it, notify.IntegrityBaselineTamper)
+	}
+	page := getStatusBody(t, mux, "text/html")
+	section := pageSection(t, page, "held-notifications", "")
+	if !strings.Contains(section, "integrity.baseline_tamper") || !strings.Contains(section, "web-k") {
+		t.Fatalf("HTML held section lacks the held message: %s", section)
+	}
+}
+
+// TestIntegrityStatusHeldListFailureIsUnavailable: a failed log read shows
+// the held block as unavailable and does not hide the rest of the page.
+func TestIntegrityStatusHeldListFailureIsUnavailable(t *testing.T) {
+	mux := http.NewServeMux()
+	mountIntegrityStatusHeld(mux, newIntegrityMonitor(slog.New(slog.DiscardHandler), "dev"), nil,
+		slog.New(slog.DiscardHandler), failingLister{})
+	var js heldStatusJSON
+	if err := json.Unmarshal([]byte(getStatusBody(t, mux, "application/json")), &js); err != nil {
+		t.Fatalf("status JSON: %v", err)
+	}
+	if js.Held == nil || js.Held.Available || len(js.Held.Items) != 0 {
+		t.Fatalf("held block = %+v, want unavailable and empty", js.Held)
+	}
+	if page := getStatusBody(t, mux, "text/html"); !strings.Contains(page, "Server-Selbstprüfung") {
+		t.Fatal("status page lost its server block")
+	}
+}
+
+// TestIntegrityStatusWithoutLogHasNoHeldBlock: without a notification log
+// the page has no held block at all.
+func TestIntegrityStatusWithoutLogHasNoHeldBlock(t *testing.T) {
+	mux := http.NewServeMux()
+	mountIntegrityStatusHeld(mux, newIntegrityMonitor(slog.New(slog.DiscardHandler), "dev"), nil,
+		slog.New(slog.DiscardHandler), heldLister(nil))
+	if body := getStatusBody(t, mux, "application/json"); strings.Contains(body, "held_notifications") {
+		t.Fatalf("held block present without a log: %s", body)
+	}
+}
 
 func TestIntegrityCheckIntervalIsADRValue(t *testing.T) {
 	// ADR 0015 D4 "When", Q2: every 60 minutes.
