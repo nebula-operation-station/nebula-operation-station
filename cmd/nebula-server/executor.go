@@ -184,9 +184,14 @@ func (l *lazyExecutor) ProposePVEImagePrepare(ctx context.Context, in *pb.Propos
 }
 
 // CommitPVEImagePrepare passes the run of an approved image preparation
-// through; the executor requires the approved permit. The server never
-// approves: see commitImagePrepare for the check it makes before sending.
+// through. The server checks only that the spec and the execution digest are
+// present (checkImageCommitInput) before it sends anything; the executor's
+// permit check decides whether the digest approves this exact run. The server
+// never approves.
 func (l *lazyExecutor) CommitPVEImagePrepare(ctx context.Context, in *pb.CommitPVEImagePrepareRequest, opts ...grpc.CallOption) (*pb.CommitPVEImagePrepareResponse, error) {
+	if err := checkImageCommitInput(in); err != nil {
+		return nil, err
+	}
 	if c := l.c.Load(); c != nil {
 		return c.CommitPVEImagePrepare(ctx, in, opts...)
 	}
