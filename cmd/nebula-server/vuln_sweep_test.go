@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vulninventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnstore"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
@@ -207,5 +208,80 @@ func TestSweepKeepsAcceptedRiskWhenClassifierFails(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "basis_error=1") {
 		t.Fatalf("log does not name the basis error:\n%s", logs.String())
+	}
+}
+
+// vdFalsePositive is a false positive of f on the finding's current basis,
+// committed as alice. It fails the test when the decision is refused.
+func vdFalsePositive(t *testing.T, x *vdEnv, f vulnstore.Finding) {
+	t.Helper()
+	d := ui.VulnDecision{Kind: ui.VulnFalsePositive, Key: f.Key, Category: vulnstore.CategoryVendorDisputed, Reason: "vendor disputes it"}
+	id := x.begin(t, "alice", d)
+	if err := vdCommit(x, "alice", id, d); err != nil {
+		t.Fatalf("commit = %v", err)
+	}
+}
+
+// TestSweepReopensFalsePositiveWithoutInventory: a host NOS holds no complete
+// package read for cannot be judged (errVulnNoInventory, D5). The false
+// positive of such a finding is re-opened as basis_unknown (D4, D6) instead of
+// staying suppressed for good (fail open).
+func TestSweepReopensFalsePositiveWithoutInventory(t *testing.T) {
+	ctx := context.Background()
+	x := newVDEnv(t, "alice", nil)
+	f := clsFinding(t, x.e, clsRecord("CVE-2026-8910", "openssl", clsOld, clsNew))
+	// The decider refuses a decision on a basis NOS cannot judge, so the
+	// false positive is stored directly, bound to the version NOS knew before
+	// its inventory was lost.
+	m := vulnstore.MarkFalsePositive{By: "alice", Category: vulnstore.CategoryVendorDisputed,
+		Reason: "vendor disputes it", BasisVersion: clsOld}
+	if err := x.e.svc.store.SetFalsePositive(ctx, f.Key, m, x.e.audit); err != nil {
+		t.Fatalf("set false positive: %v", err)
+	}
+	if got := x.state(t, f); got != vulnstore.StateFalsePositive {
+		t.Fatalf("state after the decision = %s, want false_positive", got)
+	}
+	var logs bytes.Buffer
+	x.e.svc.log = slog.New(slog.NewTextHandler(&logs, nil))
+
+	if _, err := x.e.svc.sweepOnce(ctx); err != nil {
+		t.Fatalf("sweep without inventory: %v", err)
+	}
+	if got := x.state(t, f); got != vulnstore.StateOpen {
+		t.Fatalf("state after sweep without inventory = %s, want open", got)
+	}
+	if !strings.Contains(logs.String(), "reason=basis_unknown") {
+		t.Fatalf("log does not name the basis_unknown re-open:\n%s", logs.String())
+	}
+}
+
+// TestSweepReopensFalsePositiveWithoutKernelData: when neither NOS read carries
+// running kernel data, the kernel basis of a kernel finding cannot be judged
+// (errVulnNoKernel, D4). The false positive re-opens as basis_unknown.
+func TestSweepReopensFalsePositiveWithoutKernelData(t *testing.T) {
+	ctx := context.Background()
+	x := newVDEnv(t, "alice", nil)
+	f := clsFinding(t, x.e, clsRecord("CVE-2026-8911", "linux", "6.1.119-1", "6.1.120-1"))
+	clsSettle(x.e)
+	clsPut(t, x.e, clsRead("r-kernel-"+f.Key.String()[:8], f.Updated.Add(clsLag+time.Minute), true, clsKernel("6.1.119-1")))
+	vdFalsePositive(t, x, f)
+	if got := x.state(t, f); got != vulnstore.StateFalsePositive {
+		t.Fatalf("state after the decision = %s, want false_positive", got)
+	}
+
+	// A newer complete read carries no kernel data: neither read does.
+	x.e.clk.Add(clsLag + 2*time.Minute)
+	clsPut(t, x.e, clsRead("r-nokernel-"+f.Key.String()[:8], x.e.clk.Now(), true, vulninventory.Kernel{}, clsComp("openssl", clsOld)))
+	var logs bytes.Buffer
+	x.e.svc.log = slog.New(slog.NewTextHandler(&logs, nil))
+
+	if _, err := x.e.svc.sweepOnce(ctx); err != nil {
+		t.Fatalf("sweep without kernel data: %v", err)
+	}
+	if got := x.state(t, f); got != vulnstore.StateOpen {
+		t.Fatalf("state after sweep without kernel data = %s, want open", got)
+	}
+	if !strings.Contains(logs.String(), "reason=basis_unknown") {
+		t.Fatalf("log does not name the basis_unknown re-open:\n%s", logs.String())
 	}
 }
