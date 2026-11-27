@@ -191,6 +191,12 @@ func run() error {
 	// Built-in trust (ADR 0007 E16): commits record exact artifact trust
 	// in executor.db, the same entries the risk policy reads.
 	setupBuiltinTrust(svc, *dataDir, *trustDir, *bundleDir, db, log)
+	// Signed image catalog (ADR 0008 PV-03c, D2 (a)): read once from the
+	// release bundle and verified with the active release roots of the
+	// trust store set up above. A missing, unverifiable or rolled-back
+	// catalog is audited and loads nothing; the start goes on, signed
+	// images stay unknown and local entries stay served.
+	loadBundleImageCatalog(svc, builtinTrustStoreDir(*dataDir, *trustDir), *bundleDir, time.Now, log)
 	// I1 check (ADR 0015 D4): against the reference just admitted, at
 	// start and every 60 minutes, in the background.
 	integrityLoop := setupIntegrityCheck(svc, *dataDir, integrityInstallRoot, log)

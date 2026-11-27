@@ -79,15 +79,22 @@ func classifyBuiltinBundle(dir string) builtinBundlePresence {
 	return builtinBundlePresent
 }
 
+// builtinTrustStoreDir is the built-in trust store directory: storeDir,
+// or <dataDir>/trust when storeDir is empty.
+func builtinTrustStoreDir(dataDir, storeDir string) string {
+	if storeDir == "" {
+		return filepath.Join(dataDir, builtinTrustDirName)
+	}
+	return storeDir
+}
+
 // setupBuiltinTrust wires built-in trust with the compiled release anchors
 // and the executor's configured directories; an empty storeDir means
 // <dataDir>/trust. A failure is logged, not fatal: the executor keeps
 // serving with built-ins untrusted.
 func setupBuiltinTrust(svc builtinTrustSetter, dataDir, storeDir, bundleDir string,
 	artifacts executor.BuiltinArtifactTrust, log *slog.Logger) {
-	if storeDir == "" {
-		storeDir = filepath.Join(dataDir, builtinTrustDirName)
-	}
+	storeDir = builtinTrustStoreDir(dataDir, storeDir)
 	anchors, err := release.Anchors()
 	if err == nil {
 		err = wireBuiltinTrust(svc, storeDir, bundleDir, anchors, time.Now, artifacts)
