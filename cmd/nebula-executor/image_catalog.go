@@ -149,7 +149,8 @@ func activeReleaseRoots(storeDir string, now func() time.Time) ([]release.Root, 
 	if err != nil {
 		return nil, fmt.Errorf("open built-in trust store: %w", err)
 	}
-	roots := st.RootState().Active()
+	// The same active roots the built-in trust review verifies with.
+	roots := st.Roots()
 	if len(roots) == 0 {
 		return nil, errors.New("no active release root")
 	}
