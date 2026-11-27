@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/integritystore"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/notifylog"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
