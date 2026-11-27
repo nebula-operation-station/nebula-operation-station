@@ -90,7 +90,37 @@ var (
 	// ErrPveTemplateStore is returned when the template record could not
 	// be read or written.
 	ErrPveTemplateStore = errors.New("executor: template record unavailable")
+	// ErrPveTemplateUnreadable is returned when the live template could not
+	// be read (no read token, transport error, timeout, an unexpected
+	// status, a malformed or oversize reply). It is neither "gone" nor
+	// "changed": the binding and a re-preparation proposal are refused
+	// (ADR 0008 D5).
+	ErrPveTemplateUnreadable = errors.New("executor: prepared template could not be read; refused")
 )
+
+// PveTemplateReader may be implemented by a PveMutationClient; the
+// template check of pve.image.prepare and provisioning needs it. A client
+// without it reads no template, so every binding fails closed with
+// ErrPveTemplateUnreadable.
+type PveTemplateReader interface {
+	// TemplateConfig reads the config of the QEMU template vmid on node
+	// with the read token. Found false (nil error) means the remote
+	// answered that the config does not exist; any failed or invalid read
+	// is an error.
+	TemplateConfig(ctx context.Context, rm executordb.PveRemote, node string, vmid uint64, read pveapi.TokenSupplier) (PveTemplateConfig, error)
+}
+
+// PveTemplateConfig is the result of one template read (untrusted; the
+// caller validates every member).
+type PveTemplateConfig struct {
+	// Found is false when the remote reports the config does not exist.
+	Found bool
+	// Node is the node the config was read on.
+	Node string
+	// ConfigDigest is the hex SHA-256 of the complete configuration, as in
+	// PveTargetState; empty when not found.
+	ConfigDigest string
+}
 
 // PveImage is one resolved catalog entry and its provenance.
 type PveImage struct {
@@ -534,7 +564,14 @@ func (p *PveImages) mutation(req PveImagePrepareRequest) (PveMutationRequest, Pv
 
 // ProposalRequest builds the canonical request and parameters of a new
 // pve.image.prepare proposal. The risk is raised to ImagePrepareRisk. An
-// image whose template for the key is still valid is refused.
+// image whose template for the key is still valid is refused. When the
+// key has a record, a new proposal is built only when its binding failed
+// because the template is gone (ErrPveTemplateNotPrepared), changed
+// (ErrPveTemplateChanged) or the remote was re-pinned, blocked or removed
+// (ErrPveRemoteChanged; the mutation's own remote check then refuses a
+// blocked or removed remote). Any other failure, an unreadable template
+// above all, refuses with no proposal and leaves the record as it is
+// (ADR 0008 D5).
 func (p *PveImages) ProposalRequest(ctx context.Context, req PveImagePrepareRequest, executionID string, risk canonical.Risk, stagePlanHash string, expiry time.Time) (canonical.Request, []byte, error) {
 	if err := p.checkDeps(); err != nil {
 		return canonical.Request{}, nil, err
@@ -549,10 +586,17 @@ func (p *PveImages) ProposalRequest(ctx context.Context, req PveImagePrepareRequ
 	}
 	if ok {
 		_, err := p.BindTemplate(ctx, PveTemplateBinding{PveTemplateKey: rec.PveTemplateKey, VMID: rec.VMID, Generation: rec.Generation, SourceSHA256: rec.SourceSHA256})
-		if err == nil {
+		switch {
+		case err == nil:
 			return canonical.Request{}, nil, ErrPveImagePrepared
-		}
-		if errors.Is(err, ErrPveTemplateStore) || errors.Is(err, ErrPveJobStore) {
+		case errors.Is(err, ErrPveTemplateNotPrepared), errors.Is(err, ErrPveTemplateChanged), errors.Is(err, ErrPveRemoteChanged):
+			// Gone, changed or re-pinned: a new proposal with its own
+			// approval may replace the record.
+		default:
+			if errors.Is(err, ErrPveTemplateUnreadable) {
+				p.Mutations.log().Warn("audit", "kind", "pve_template_unreadable", "remote", rec.RemoteID, "node", rec.Node,
+					"image", rec.ImageID, "vmid", rec.VMID, "generation", rec.Generation)
+			}
 			return canonical.Request{}, nil, err
 		}
 	}
@@ -617,14 +661,28 @@ func (p *PveImages) auditUnrecorded(req PveImagePrepareRequest, executionID, rea
 }
 
 // liveTemplate reads the template's live configuration digest with the
-// read token and checks that it is on node.
+// read token (PveTemplateReader) and checks that it is on node. A template
+// the remote reports as not existing is ErrPveTemplateNotPrepared; one on
+// another node, or with an invalid digest, is ErrPveTemplateChanged; a
+// failed read is ErrPveTemplateUnreadable, which wraps no other error, so
+// it never matches the fall-through of ProposalRequest.
 func (p *PveImages) liveTemplate(ctx context.Context, rm executordb.PveRemote, node string, vmid uint64) (string, error) {
+	tr, ok := p.Mutations.Client.(PveTemplateReader)
+	if !ok {
+		return "", fmt.Errorf("read template %d: %w", vmid, ErrPveTemplateUnreadable)
+	}
 	read, err := p.Mutations.readToken(rm)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("read template %d: no read token: %w", vmid, ErrPveTemplateUnreadable)
 	}
-	live, err := p.Mutations.Client.TargetState(ctx, rm, permit.ProviderKindQemu, node, vmid, read)
-	if err != nil || live.Node != node || !validHexDigest(live.ConfigDigest) {
+	live, err := tr.TemplateConfig(ctx, rm, node, vmid, read)
+	if err != nil {
+		return "", fmt.Errorf("read template %d: %w", vmid, ErrPveTemplateUnreadable)
+	}
+	if !live.Found {
+		return "", ErrPveTemplateNotPrepared
+	}
+	if live.Node != node || !validHexDigest(live.ConfigDigest) {
 		return "", ErrPveTemplateChanged
 	}
 	return live.ConfigDigest, nil
