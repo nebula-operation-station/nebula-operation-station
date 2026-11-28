@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"time"
 
+	"modernc.org/sqlite"
+	sqlitelib "modernc.org/sqlite/lib"
+
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/osdebian"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulninventory"
@@ -69,6 +72,47 @@ type vulnClassifier struct {
 // reads, so no consistent basis was found (fail closed).
 var errVulnReadRace = errors.New("NOS inventory reads changed while the closure was judged")
 
+// sqliteResultPrimaryMask extracts the primary SQLite result code: an extended
+// code carries its primary code in the low byte.
+const sqliteResultPrimaryMask = 0xff
+
+// storeReadErr wraps a failed read of the inventory store. The error chain is
+// kept, so isTransientBasisErr can see a context end or a busy or locked
+// database. A malformed stored read, a limit error or any other store failure
+// stays permanent.
+func storeReadErr(what string, err error) error {
+	return fmt.Errorf("classify: %s: %w", what, err)
+}
+
+// isSQLiteBusyOrLocked reports whether err is a driver error with the result
+// code SQLITE_BUSY or SQLITE_LOCKED, primary or extended.
+func isSQLiteBusyOrLocked(err error) bool {
+	var se *sqlite.Error
+	if !errors.As(err, &se) {
+		return false
+	}
+	primary := se.Code() & sqliteResultPrimaryMask
+	return primary == sqlitelib.SQLITE_BUSY || primary == sqlitelib.SQLITE_LOCKED
+}
+
+// isTransientBasisErr reports whether a classifier error about one finding's
+// basis is transient: the human state of the finding stays for this sweep and
+// the next sweep judges it again (ADR 0011 D6). The transient errors are
+// exactly these and nothing else:
+//
+//   - errVulnReadRace: the newest read kept changing while NOS read the pair.
+//   - context.Canceled and context.DeadlineExceeded: the sweep or the request
+//     ended while NOS read the inventory.
+//   - SQLITE_BUSY and SQLITE_LOCKED of the inventory store: the database is
+//     busy or locked (found by code with errors.As on *sqlite.Error).
+//
+// Every other error is permanent for the finding or unknown, and the basis is
+// then unknown (fail closed).
+func isTransientBasisErr(err error) bool {
+	return errors.Is(err, errVulnReadRace) || errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) || isSQLiteBusyOrLocked(err)
+}
+
 // vulnAssessment is NOS's view of one finding: its closure class and the
 // basis version NOS knows for the component ("" when NOS does not know it).
 type vulnAssessment struct {
@@ -96,7 +140,7 @@ func (c vulnClassifier) readPair(ctx context.Context, host string) (vulninventor
 			return vulninventory.Read{}, vulninventory.Read{}, errVulnNoInventory
 		}
 		if err != nil {
-			return vulninventory.Read{}, vulninventory.Read{}, fmt.Errorf("classify: latest read: %w", err)
+			return vulninventory.Read{}, vulninventory.Read{}, storeReadErr("latest read", err)
 		}
 		if c.betweenReads != nil {
 			c.betweenReads()
@@ -106,11 +150,11 @@ func (c vulnClassifier) readPair(ctx context.Context, host string) (vulninventor
 			return vulninventory.Read{}, vulninventory.Read{}, errVulnNoInventory
 		}
 		if err != nil {
-			return vulninventory.Read{}, vulninventory.Read{}, fmt.Errorf("classify: last complete read: %w", err)
+			return vulninventory.Read{}, vulninventory.Read{}, storeReadErr("last complete read", err)
 		}
 		again, err := c.inv.Latest(ctx, host)
 		if err != nil {
-			return vulninventory.Read{}, vulninventory.Read{}, fmt.Errorf("classify: latest read again: %w", err)
+			return vulninventory.Read{}, vulninventory.Read{}, storeReadErr("latest read again", err)
 		}
 		if again.ID == latest.ID {
 			return latest, lc, nil

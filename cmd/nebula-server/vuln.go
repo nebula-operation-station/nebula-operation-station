@@ -509,23 +509,27 @@ func (v *vulnService) sweepOnce(ctx context.Context) (vulnstore.PruneResult, err
 // current version basis of the finding's component, from the same
 // classification the decisions use.
 //
-// known is false when NOS cannot judge the component for good: no complete
-// read, a read of another ecosystem, no ecosystem, no kernel data, or a
-// component NOS does not read (ADR 0011 D4, D6). The human state then
-// re-opens as basis_unknown; keeping it would suppress the finding without
-// any basis (fail open). Any other classifier failure is returned as err: a
-// transient read race, or a failed read or database access. The human state
-// stays and the next sweep judges the finding again.
+// known is false, and the human state re-opens as basis_unknown (ADR 0011 D4,
+// D6), unless the classifier error is transient (isTransientBasisErr). Every
+// other error fails closed: the four sentinels (errVulnNoInventory,
+// errVulnNoKernel, errVulnEcosystem, errVulnNoEcosystem) mean NOS cannot judge
+// the component, and any permanent error (a malformed or non-canonical stored
+// read, a store error that is not busy or locked, a malformed episode fixed
+// version, an unknown ecosystem scheme, a version that does not compare) cannot
+// be judged either. Keeping the state for those would suppress the
+// finding for good (fail open), because the next sweep would fail the same way.
+//
+// A transient error is returned as err. The human state stays for this sweep,
+// the log counts it as basis_error, and the next sweep judges the finding again.
 func (v *vulnService) humanBasis(ctx context.Context, f vulnstore.Finding) (string, bool, error) {
 	a, err := v.classifier.assess(ctx, f)
 	switch {
 	case err == nil:
 		return a.nosVersion, a.nosVersion != "", nil
-	case errors.Is(err, errVulnNoInventory), errors.Is(err, errVulnNoKernel),
-		errors.Is(err, errVulnEcosystem), errors.Is(err, errVulnNoEcosystem):
-		return "", false, nil
-	default:
+	case isTransientBasisErr(err):
 		return "", false, fmt.Errorf("judge basis of %s: %w", f.Subject.String(), err)
+	default:
+		return "", false, nil
 	}
 }
 
