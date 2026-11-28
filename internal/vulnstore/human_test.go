@@ -156,3 +156,45 @@ func TestAcceptedRiskOfKEVFindingNotReopenedForSameKEV(t *testing.T) {
 		t.Fatalf("reopened = %+v, %v", got, err)
 	}
 }
+
+// TestReviewHumanStatesKeepsStateWhenBasisErrors: a failed basis judgment (a
+// transient inventory read failure) is not "basis unknown" (D6). The human
+// state stays as the admin set it, the error is reported, and the rest of the
+// review still runs.
+func TestReviewHumanStatesKeepsStateWhenBasisErrors(t *testing.T) {
+	e := newEnv(t)
+	items := e.seed(t, "web01", 2)
+	failing, unknown := items[0].Finding.Key, items[1].Finding.Key
+	if err := e.st.SetAcceptedRisk(e.ctx, failing, AcceptRisk{Approver: "admin", Reason: "isolated host", BasisVersion: "1.0-1"}, e.audit()); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.SetFalsePositive(e.ctx, unknown, MarkFalsePositive{By: "admin", Category: CategoryOther, Reason: "r", BasisVersion: "1.0-1"}, e.audit()); err != nil {
+		t.Fatal(err)
+	}
+	before := e.get(t, failing).Human
+	if before == nil {
+		t.Fatal("no human state set")
+	}
+	errRead := errors.New("inventory read failed")
+	basis := func(_ context.Context, f Finding) (string, bool, error) {
+		if f.Key == failing {
+			return "", false, errRead
+		}
+		return "", false, nil // component unknown, no error
+	}
+	got, err := e.st.ReviewHumanStates(e.ctx, basis)
+	if !errors.Is(err, errRead) {
+		t.Fatalf("review error = %v, want the basis error reported", err)
+	}
+	if len(got) != 1 || got[0].Key != unknown || got[0].Reason != ReopenBasisUnknown {
+		t.Fatalf("reopened = %+v, want only the unknown basis as basis_unknown", got)
+	}
+	f := e.get(t, failing)
+	if f.State != StateAcceptedRisk || f.Human == nil {
+		t.Fatalf("accepted_risk re-opened on a basis error: state %s", f.State)
+	}
+	if f.Human.By != before.By || f.Human.Reason != before.Reason || f.Human.BasisVersion != before.BasisVersion || !f.Human.Expires.Equal(before.Expires) {
+		t.Fatalf("human state changed on a basis error: %+v, was %+v", f.Human, before)
+	}
+	e.wantState(t, unknown, StateOpen, "")
+}

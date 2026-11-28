@@ -435,9 +435,8 @@ func (v *vulnService) runNotify(ctx context.Context, interval time.Duration) {
 }
 
 // runSweeps calls vulnstore.ResumeCompleting once at startup and then
-// vulnstore.Prune every interval (which runs ResumeCompleting and
-// AbortExpiredRuns before the retention), each bounded by
-// vulnSweepTimeout. Errors are logged and retried at the next interval.
+// sweepOnce every interval, each bounded by vulnSweepTimeout. Errors are
+// logged and retried at the next interval.
 func (v *vulnService) runSweeps(ctx context.Context, interval time.Duration) {
 	sctx, cancel := context.WithTimeout(ctx, vulnSweepTimeout)
 	n, err := v.store.ResumeCompleting(sctx)
@@ -455,24 +454,78 @@ func (v *vulnService) runSweeps(ctx context.Context, interval time.Duration) {
 			return
 		case <-t.C:
 		}
-		sctx, cancel := context.WithTimeout(ctx, vulnSweepTimeout)
-		res, err := v.store.Prune(sctx)
-		// Snapshots are pruned after the findings. This sweep deletes no
-		// inventory read, so no snapshot is left pointing at a deleted read.
-		if serr := v.sweepSnapshots(sctx); serr != nil {
-			v.log.Error("vulnerability inventory: prune snapshots", "error", serr)
-		}
-		cancel()
-		attrs := []any{"resumed", res.ResumedRuns, "aborted", res.AbortedRuns, "deleted_findings", res.DeletedFindings,
-			"cleared_assessment", res.ClearedAssessment, "deleted_runs", res.DeletedRuns, "deleted_history", res.DeletedHistory}
-		if err != nil {
-			v.log.Error("vulnerability store: sweep", append(attrs, "error", err)...)
-		} else if res != (vulnstore.PruneResult{}) {
-			v.log.Info("vulnerability store: sweep", attrs...)
-		}
+		res, err := v.sweepOnce(ctx)
 		if v.swept != nil {
 			v.swept(res, err)
 		}
+	}
+}
+
+// sweepOnce is one sweep, bounded by vulnSweepTimeout: vulnstore.Prune
+// (which resumes and aborts runs before the retention), the snapshot prune,
+// and the re-check of the human states (ADR 0011 D6) against NOS's own
+// version basis (humanBasis). The re-opened states are logged. It returns
+// the prune result and the first error.
+func (v *vulnService) sweepOnce(ctx context.Context) (vulnstore.PruneResult, error) {
+	sctx, cancel := context.WithTimeout(ctx, vulnSweepTimeout)
+	res, err := v.store.Prune(sctx)
+	// Snapshots are pruned after the findings. This sweep deletes no
+	// inventory read, so no snapshot is left pointing at a deleted read.
+	if serr := v.sweepSnapshots(sctx); serr != nil {
+		v.log.Error("vulnerability inventory: prune snapshots", "error", serr)
+	}
+	// basisErrs counts the findings whose basis could not be judged because
+	// the classifier failed. Such a finding keeps its human state in this
+	// sweep (D6); the log says so, which tells a failed read apart from a
+	// component NOS really does not know (basis_unknown).
+	basisErrs := 0
+	basis := func(ctx context.Context, f vulnstore.Finding) (string, bool, error) {
+		ver, known, berr := v.humanBasis(ctx, f)
+		if berr != nil {
+			basisErrs++
+		}
+		return ver, known, berr
+	}
+	reopened, rerr := v.store.ReviewHumanStates(sctx, basis)
+	cancel()
+	for _, r := range reopened {
+		v.log.Info("vulnerability human state re-opened", "finding_key", r.Key.String(), "reason", string(r.Reason))
+	}
+	if rerr != nil {
+		v.log.Error("vulnerability store: review human states", "error", rerr, "reopened", len(reopened),
+			"basis_error", basisErrs)
+	}
+	attrs := []any{"resumed", res.ResumedRuns, "aborted", res.AbortedRuns, "deleted_findings", res.DeletedFindings,
+		"cleared_assessment", res.ClearedAssessment, "deleted_runs", res.DeletedRuns, "deleted_history", res.DeletedHistory}
+	if err != nil {
+		v.log.Error("vulnerability store: sweep", append(attrs, "error", err)...)
+	} else if res != (vulnstore.PruneResult{}) {
+		v.log.Info("vulnerability store: sweep", attrs...)
+	}
+	return res, err
+}
+
+// humanBasis is the vulnstore.BasisFunc of the human-state review: NOS's
+// current version basis of the finding's component, from the same
+// classification the decisions use.
+//
+// known is false when NOS cannot judge the component for good: no complete
+// read, a read of another ecosystem, no ecosystem, no kernel data, or a
+// component NOS does not read (ADR 0011 D4, D6). The human state then
+// re-opens as basis_unknown; keeping it would suppress the finding without
+// any basis (fail open). Any other classifier failure is returned as err: a
+// transient read race, or a failed read or database access. The human state
+// stays and the next sweep judges the finding again.
+func (v *vulnService) humanBasis(ctx context.Context, f vulnstore.Finding) (string, bool, error) {
+	a, err := v.classifier.assess(ctx, f)
+	switch {
+	case err == nil:
+		return a.nosVersion, a.nosVersion != "", nil
+	case errors.Is(err, errVulnNoInventory), errors.Is(err, errVulnNoKernel),
+		errors.Is(err, errVulnEcosystem), errors.Is(err, errVulnNoEcosystem):
+		return "", false, nil
+	default:
+		return "", false, fmt.Errorf("judge basis of %s: %w", f.Subject.String(), err)
 	}
 }
 
