@@ -257,7 +257,7 @@ func dexSetup(t *testing.T, seed func(t *testing.T, e *vtEnv) dexSeed) (*dexEnv,
 	// her own web session. The holder of this session is the only maintainer.
 	code, body, _ := dexCall(t, de.s.base, http.MethodPost, "/privileged/begin", de.aliceSess, map[string]any{})
 	if code != http.StatusOK {
-		t.Fatalf("privileged begin = %d %s (log: %s)", code, body, de.s.stderr)
+		dexFatal(t, de.s, "privileged begin = %d %s", code, body)
 	}
 	var pb struct {
 		Options json.RawMessage `json:"options"`
@@ -268,9 +268,26 @@ func dexSetup(t *testing.T, seed func(t *testing.T, e *vtEnv) dexSeed) (*dexEnv,
 	code, body, _ = dexCall(t, de.s.base, http.MethodPost, "/privileged/finish", de.aliceSess,
 		map[string]any{"assertion": de.alice.sign(t, pb.Options)})
 	if code != http.StatusOK {
-		t.Fatalf("privileged finish = %d %s (log: %s)", code, body, de.s.stderr)
+		dexFatal(t, de.s, "privileged finish = %d %s", code, body)
 	}
 	return de, sd
+}
+
+// dexCallTimeout bounds one request, so a hung server fails its case instead
+// of blocking the test until the global test timeout. dexMaxBody bounds the
+// body read of one response.
+const (
+	dexCallTimeout = 10 * time.Second
+	dexMaxBody     = 1 << 20
+)
+
+// dexFatal stops the server, so that its log is no longer written, and fails
+// the test with the message and the server log. It is the failure path of
+// every helper that reads the log.
+func dexFatal(t *testing.T, s *vrServer, format string, args ...any) {
+	t.Helper()
+	s.stop()
+	t.Fatalf("%s (log: %s)", fmt.Sprintf(format, args...), s.stderr.String())
 }
 
 // dexCall sends one request to base. cookie is a session cookie value (empty
@@ -296,13 +313,20 @@ func dexCall(t *testing.T, base, method, path, cookie string, body any) (int, []
 		req.Header.Set("Origin", vrOrigin)
 		req.Header.Set("Content-Type", "application/json")
 	}
-	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	client := &http.Client{Timeout: dexCallTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, path, err)
 	}
 	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
+	b, err := io.ReadAll(io.LimitReader(resp.Body, dexMaxBody+1))
+	if err != nil {
+		t.Fatalf("%s %s: read body: %v", method, path, err)
+	}
+	if len(b) > dexMaxBody {
+		t.Fatalf("%s %s: body is larger than %d bytes", method, path, dexMaxBody)
+	}
 	return resp.StatusCode, b, resp.Cookies()
 }
 
@@ -324,7 +348,7 @@ func dexLogin(t *testing.T, s *vrServer, k dexKey) string {
 	code, body, cookies := dexCall(t, s.base, http.MethodPost, "/login/finish", "",
 		map[string]any{"login_id": b.LoginID, "assertion": k.sign(t, b.Options)})
 	if code != http.StatusOK {
-		t.Fatalf("login finish = %d %s (log: %s)", code, body, s.stderr)
+		dexFatal(t, s, "login finish = %d %s", code, body)
 	}
 	for _, c := range cookies {
 		if c.Name == auth.CookieName {
@@ -426,6 +450,41 @@ func (de *dexEnv) dexSignedDecision(cookie string, k dexKey, in map[string]any) 
 	return de.dexCommit(cookie, id, k.sign(de.t, opts))
 }
 
+// dexOnlyChanged fails unless the store state after one applied decision
+// (dexState) differs from the state before it in exactly two ways: the audit
+// line of kind goes from 0 to 1, and the lines of the decided findings (keys)
+// may change. Every other audit line (every other decision kind) and every
+// other finding line must be unchanged.
+func dexOnlyChanged(t *testing.T, kind, before, after string, keys []vulnfinding.Key) {
+	t.Helper()
+	bl := strings.Split(before, "\n")
+	al := strings.Split(after, "\n")
+	if len(bl) != len(al) {
+		t.Fatalf("store state has %d lines after the decision, %d before:\nbefore:\n%s\nafter:\n%s",
+			len(al), len(bl), before, after)
+	}
+	auditLine := "audit " + kind + "="
+	for i := range bl {
+		switch {
+		case bl[i] == al[i]:
+		case bl[i] == auditLine+"0" && al[i] == auditLine+"1":
+		case dexKeyLine(bl[i], keys) && dexKeyLine(al[i], keys):
+		default:
+			t.Fatalf("line %d changed by the decision:\nbefore: %q\nafter:  %q", i+1, bl[i], al[i])
+		}
+	}
+}
+
+// dexKeyLine reports whether line is the state line of one of keys.
+func dexKeyLine(line string, keys []vulnfinding.Key) bool {
+	for _, k := range keys {
+		if strings.HasPrefix(line, "finding "+k.String()+" ") {
+			return true
+		}
+	}
+	return false
+}
+
 // dexExpiry is a date 30 days ahead, in the form's layout.
 func dexExpiry() string { return time.Now().Add(30 * 24 * time.Hour).UTC().Format("2006-01-02") }
 
@@ -446,11 +505,12 @@ type dexDecisionCase struct {
 	check    func(t *testing.T, e *vtEnv, sd dexSeed)
 }
 
-// TestVulnDecisionEndToEndOverHTTP: each of the four decisions a maintainer
-// may submit with a security key (accept risk, confirm a held closure,
-// discard a held closure, reset a feed mark) is sent over HTTP, signed by
-// the maintainer's virtual key, applied by the real store, shown on the page,
-// and audited exactly once.
+// TestVulnDecisionEndToEndOverHTTP: each of the five decisions a maintainer
+// may submit with a security key (accept risk, mark a false positive, confirm
+// a held closure, discard a held closure, reset a feed mark) is sent over
+// HTTP, signed by the maintainer's virtual key, applied by the real store,
+// shown on the page, and audited exactly once. Nothing else in the store may
+// change.
 func TestVulnDecisionEndToEndOverHTTP(t *testing.T) {
 	cases := []dexDecisionCase{
 		{
@@ -466,6 +526,26 @@ func TestVulnDecisionEndToEndOverHTTP(t *testing.T) {
 			check: func(t *testing.T, e *vtEnv, sd dexSeed) {
 				if f, err := e.svc.store.Get(context.Background(), sd.keys[0]); err != nil || f.State != vulnstore.StateAcceptedRisk {
 					t.Fatalf("finding state = %v, %v; want accepted_risk", f.State, err)
+				}
+			},
+		},
+		{
+			name: "false_positive", kind: vulnstore.AuditVulnFalsePositive,
+			seed: func(t *testing.T, e *vtEnv) dexSeed {
+				return dexSeed{keys: []vulnfinding.Key{vdFinding(t, e, "CVE-2026-8704").Key}}
+			},
+			input: func(sd dexSeed) map[string]any {
+				return map[string]any{"kind": "false_positive", "key": sd.keys[0].String(),
+					"category": vulnstore.CategoryVendorDisputed, "reason": "vendor disputes it"}
+			},
+			shows: `vuln-state">false positive</span>`,
+			check: func(t *testing.T, e *vtEnv, sd dexSeed) {
+				f, err := e.svc.store.Get(context.Background(), sd.keys[0])
+				if err != nil || f.State != vulnstore.StateFalsePositive {
+					t.Fatalf("finding state = %v, %v; want false_positive", f.State, err)
+				}
+				if f.Human == nil || f.Human.By != "alice" || f.Human.Category != vulnstore.CategoryVendorDisputed || f.Human.Reason != "vendor disputes it" {
+					t.Fatalf("human decision = %+v; want alice's vendor_disputed decision with its reason", f.Human)
 				}
 			},
 		},
@@ -498,7 +578,7 @@ func TestVulnDecisionEndToEndOverHTTP(t *testing.T) {
 			input: func(sd dexSeed) map[string]any {
 				return map[string]any{"kind": "discard_hold", "key": sd.keys[0].String(), "run_id": sd.run}
 			},
-			shows: "open",
+			shows: `vuln-state">open</span>`,
 			check: func(t *testing.T, e *vtEnv, sd dexSeed) {
 				ctx := context.Background()
 				if h, err := e.svc.store.Holds(ctx, sd.keys[0]); err != nil || len(h) != 0 {
@@ -530,7 +610,7 @@ func TestVulnDecisionEndToEndOverHTTP(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			de, sd := dexSetup(t, tc.seed)
 			if code := de.dexSignedDecision(de.aliceSess, de.alice, tc.input(sd)); code != http.StatusOK {
-				t.Fatalf("decision = %d (log: %s)", code, de.s.stderr)
+				dexFatal(t, de.s, "decision = %d", code)
 			}
 			path := "/vulnerabilities"
 			if !tc.overview {
@@ -539,7 +619,8 @@ func TestVulnDecisionEndToEndOverHTTP(t *testing.T) {
 			if page := de.dexPage(de.aliceSess, path); !strings.Contains(page, tc.shows) {
 				t.Fatalf("%s does not show %q", path, tc.shows)
 			}
-			de.s.stop()
+			after := de.dexStop(sd.keys)
+			dexOnlyChanged(t, tc.kind, de.before, after, sd.keys)
 			db, err := serverdb.Open(filepath.Join(de.dir, "server.db"))
 			if err != nil {
 				t.Fatal(err)
