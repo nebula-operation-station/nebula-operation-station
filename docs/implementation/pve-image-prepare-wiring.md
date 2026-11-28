@@ -3,6 +3,8 @@
 Status: **decided** by the maintainer, 2026-11-21; see "Decision (2026-11-21,
 maintainer)" below (previously: decision paper, proposal). No code is changed
 by this document.
+Implementation status (2026-11-28): the PV-03 tickets up to the documentation (PV-03i) are merged (see [status](../status.md)); the end-to-end
+acceptance run against a real PVE is blocked on the action token privileges (pi14, maintainer decision).
 Date: 2026-11-20. Ticket: uf18 (gap G04). Scope: the path that prepares a
 PVE template from a signed catalog entry, so that `pve.guest.provision` can
 clone it. Read with [ADR 0008](../adr/0008-guest-provisioning.md) section 2
