@@ -4,10 +4,12 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
+
+	"modernc.org/sqlite"
+	sqlitelib "modernc.org/sqlite/lib"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/osdebian"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
@@ -70,40 +72,45 @@ type vulnClassifier struct {
 // reads, so no consistent basis was found (fail closed).
 var errVulnReadRace = errors.New("NOS inventory reads changed while the closure was judged")
 
-// errVulnStoreRead: the inventory store failed to read a host's reads with a
-// database or read error. It says nothing about the finding, so the next
-// sweep judges it again (ADR 0011 D6). Set only by storeReadErr.
-var errVulnStoreRead = errors.New("NOS inventory store read failed")
+// sqliteResultPrimaryMask extracts the primary SQLite result code: an extended
+// code carries its primary code in the low byte.
+const sqliteResultPrimaryMask = 0xff
 
-// storeReadErr wraps a failed read of the inventory store. A stored read that
-// is malformed or over a limit (vulninventory.ErrInvalidRead, ErrLimit, a
-// JSON body error) is permanent for the host and stays a plain error, which
-// fails closed. Any other failure is a database or read error and transient
-// (errVulnStoreRead). Context ends stay visible to errors.Is as well.
+// storeReadErr wraps a failed read of the inventory store. The error chain is
+// kept, so isTransientBasisErr can see a context end or a busy or locked
+// database. A malformed stored read, a limit error or any other store failure
+// stays permanent.
 func storeReadErr(what string, err error) error {
-	var syntax *json.SyntaxError
-	var typ *json.UnmarshalTypeError
-	if errors.Is(err, vulninventory.ErrInvalidRead) || errors.Is(err, vulninventory.ErrLimit) ||
-		errors.As(err, &syntax) || errors.As(err, &typ) {
-		return fmt.Errorf("classify: %s: %w", what, err)
+	return fmt.Errorf("classify: %s: %w", what, err)
+}
+
+// isSQLiteBusyOrLocked reports whether err is a driver error with the result
+// code SQLITE_BUSY or SQLITE_LOCKED, primary or extended.
+func isSQLiteBusyOrLocked(err error) bool {
+	var se *sqlite.Error
+	if !errors.As(err, &se) {
+		return false
 	}
-	return fmt.Errorf("classify: %s: %w: %w", what, errVulnStoreRead, err)
+	primary := se.Code() & sqliteResultPrimaryMask
+	return primary == sqlitelib.SQLITE_BUSY || primary == sqlitelib.SQLITE_LOCKED
 }
 
 // isTransientBasisErr reports whether a classifier error about one finding's
 // basis is transient: the human state of the finding stays for this sweep and
-// the next sweep judges it again (ADR 0011 D6). The transient errors are the
-// named list below and nothing else. Every other error is permanent for the
-// finding or unknown, and the basis is then unknown (fail closed).
+// the next sweep judges it again (ADR 0011 D6). The transient errors are
+// exactly these and nothing else:
 //
 //   - errVulnReadRace: the newest read kept changing while NOS read the pair.
 //   - context.Canceled and context.DeadlineExceeded: the sweep or the request
 //     ended while NOS read the inventory.
-//   - errVulnStoreRead: a database or read error of the inventory store
-//     (see storeReadErr).
+//   - SQLITE_BUSY and SQLITE_LOCKED of the inventory store: the database is
+//     busy or locked (found by code with errors.As on *sqlite.Error).
+//
+// Every other error is permanent for the finding or unknown, and the basis is
+// then unknown (fail closed).
 func isTransientBasisErr(err error) bool {
 	return errors.Is(err, errVulnReadRace) || errors.Is(err, context.Canceled) ||
-		errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errVulnStoreRead)
+		errors.Is(err, context.DeadlineExceeded) || isSQLiteBusyOrLocked(err)
 }
 
 // vulnAssessment is NOS's view of one finding: its closure class and the

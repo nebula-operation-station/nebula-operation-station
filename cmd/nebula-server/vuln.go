@@ -513,9 +513,10 @@ func (v *vulnService) sweepOnce(ctx context.Context) (vulnstore.PruneResult, err
 // D6), unless the classifier error is transient (isTransientBasisErr). Every
 // other error fails closed: the four sentinels (errVulnNoInventory,
 // errVulnNoKernel, errVulnEcosystem, errVulnNoEcosystem) mean NOS cannot judge
-// the component, and any permanent error of this finding (a malformed episode
-// fixed version, an unknown ecosystem scheme, a version that does not compare)
-// cannot be judged either. Keeping the state for those would suppress the
+// the component, and any permanent error (a malformed or non-canonical stored
+// read, a store error that is not busy or locked, a malformed episode fixed
+// version, an unknown ecosystem scheme, a version that does not compare) cannot
+// be judged either. Keeping the state for those would suppress the
 // finding for good (fail open), because the next sweep would fail the same way.
 //
 // A transient error is returned as err. The human state stays for this sweep,

@@ -5,12 +5,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"modernc.org/sqlite"
+	sqlitelib "modernc.org/sqlite/lib"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulninventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnstore"
@@ -385,7 +390,15 @@ func TestSweepKeepsFalsePositiveWhenStoreReadIsCanceled(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	x.e.svc.classifier.betweenReads = func() { <-ctx.Done() }
+	x.e.svc.classifier.betweenReads = func() {
+		// A bounded wait: a regression that does not pass the deadline on to
+		// the read would otherwise hang here until the test timeout.
+		select {
+		case <-ctx.Done():
+		case <-time.After(2 * time.Second):
+			t.Error("the read did not end with its context: the deadline is not passed on")
+		}
+	}
 	var logs bytes.Buffer
 	x.e.svc.log = slog.New(slog.NewTextHandler(&logs, nil))
 
@@ -403,12 +416,77 @@ func TestSweepKeepsFalsePositiveWhenStoreReadIsCanceled(t *testing.T) {
 	}
 }
 
+// sqliteBusyErr returns a real SQLITE_BUSY error of the driver: a read with no
+// busy timeout while another connection holds the database exclusively
+// (rollback journal).
+func sqliteBusyErr(t *testing.T) error {
+	t.Helper()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "busy.db")
+	holder, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open holder: %v", err)
+	}
+	defer holder.Close()
+	if _, err := holder.Exec("CREATE TABLE t (x INTEGER)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	conn, err := holder.Conn(ctx)
+	if err != nil {
+		t.Fatalf("holder conn: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "BEGIN EXCLUSIVE"); err != nil {
+		t.Fatalf("begin exclusive: %v", err)
+	}
+	defer func() { _, _ = conn.ExecContext(ctx, "ROLLBACK") }()
+	reader, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(0)")
+	if err != nil {
+		t.Fatalf("open reader: %v", err)
+	}
+	defer reader.Close()
+	var n int
+	err = reader.QueryRowContext(ctx, "SELECT count(*) FROM t").Scan(&n)
+	requireSQLiteCode(t, err, sqlitelib.SQLITE_BUSY)
+	return err
+}
+
+// sqliteSyntaxErr returns a real SQLITE_ERROR of the driver: a statement that
+// names no table. It is a permanent failure, not a busy or locked database.
+func sqliteSyntaxErr(t *testing.T) error {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "empty.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+	var n int
+	err = db.QueryRow("SELECT count(*) FROM no_such_table").Scan(&n)
+	if err == nil {
+		t.Fatal("query of a missing table succeeded")
+	}
+	return err
+}
+
+// requireSQLiteCode fails the test unless err is a driver error with the
+// primary result code want (extended codes carry it in their low byte).
+func requireSQLiteCode(t *testing.T, err error, want int) {
+	t.Helper()
+	var se *sqlite.Error
+	if !errors.As(err, &se) {
+		t.Fatalf("error %v is not a SQLite driver error", err)
+	}
+	if got := se.Code() & 0xff; got != want {
+		t.Fatalf("SQLite result code = %d (%v), want primary code %d", se.Code(), err, want)
+	}
+}
+
 // TestBasisErrorsFailClosedUnlessTransient: only the named transient errors
 // keep a human state for one sweep (isTransientBasisErr). Every other error,
-// including a malformed stored read, means the basis is unknown.
+// including a malformed stored read and a store error that is not busy or
+// locked, means the basis is unknown. The database cases use real driver errors.
 func TestBasisErrorsFailClosedUnlessTransient(t *testing.T) {
-	badRead := storeReadErr("latest read", fmt.Errorf("decode: %w", vulninventory.ErrInvalidRead))
-	dbErr := storeReadErr("latest read", errors.New("database is locked"))
+	busy := sqliteBusyErr(t)
 	cases := []struct {
 		name      string
 		err       error
@@ -417,9 +495,15 @@ func TestBasisErrorsFailClosedUnlessTransient(t *testing.T) {
 		{"read race", errVulnReadRace, true},
 		{"deadline", fmt.Errorf("classify: %w", context.DeadlineExceeded), true},
 		{"canceled", fmt.Errorf("classify: %w", context.Canceled), true},
-		{"database read", dbErr, true},
-		{"database read wrapped by a later step", fmt.Errorf("classify: again: %w", dbErr), true},
-		{"malformed stored read", badRead, false},
+		{"database busy", storeReadErr("latest read", busy), true},
+		{"database busy wrapped by a later step", fmt.Errorf("classify: again: %w", storeReadErr("latest read", busy)), true},
+		{"sql error of the store", storeReadErr("latest read", sqliteSyntaxErr(t)), false},
+		{"malformed stored read (not canonical)", storeReadErr("latest read",
+			errors.New("vulninventory: decode body: body is not canonical")), false},
+		{"malformed stored read (invalid)", storeReadErr("latest read",
+			fmt.Errorf("decode: %w", vulninventory.ErrInvalidRead)), false},
+		{"sql scan of a NULL column", storeReadErr("latest read",
+			errors.New(`sql: Scan error on column index 11, name "kernel_version": converting NULL to string is unsupported`)), false},
 		{"no inventory", errVulnNoInventory, false},
 		{"no kernel", errVulnNoKernel, false},
 		{"other ecosystem", errVulnEcosystem, false},
@@ -435,4 +519,32 @@ func TestBasisErrorsFailClosedUnlessTransient(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSweepReopensFalsePositiveWithNonCanonicalRead: a stored read whose body
+// is not in canonical form is permanent for the host. The read is stored and
+// read through the real store path, so vulninventory's decodeBody error reaches
+// the classifier without any sentinel. The false positive re-opens as
+// basis_unknown; kept suppressed it would stay suppressed on every sweep (fail
+// open, D6).
+func TestSweepReopensFalsePositiveWithNonCanonicalRead(t *testing.T) {
+	x := newVDEnv(t, "alice", nil)
+	f := clsFinding(t, x.e, clsRecord("CVE-2026-8924", "openssl", clsOld, clsNew))
+	clsSettle(x.e)
+	exec := "r-noncanon-" + f.Key.String()[:8]
+	clsPut(t, x.e, clsRead(exec, f.Updated.Add(clsLag+time.Minute), true,
+		clsKernel("6.1.119-1"), clsComp("openssl", clsOld)))
+	vdStoreFalsePositive(t, x, f)
+	// The store's triggers make reads immutable, so a corrupted read is stored as
+	// a new row: a copy of the good read with a leading space, which keeps the
+	// body valid JSON but not its canonical encoding. The copy has the same read
+	// time and a higher id, so it is the newest read.
+	if _, err := x.e.db.Exec(`INSERT INTO vuln_inventory_reads (host_id, execution_id, read_at, complete, reason,
+		dropped, ecosystem, kernel_release, kernel_state, kernel_source, kernel_version, binaries, sources, body)
+		SELECT host_id, ?, read_at, complete, reason, dropped, ecosystem, kernel_release, kernel_state,
+		kernel_source, kernel_version, binaries, sources, CAST(' ' || CAST(body AS TEXT) AS BLOB)
+		FROM vuln_inventory_reads WHERE execution_id = ?`, exec+"-bad", exec); err != nil {
+		t.Fatalf("store non-canonical read: %v", err)
+	}
+	vdSweepReopens(t, x, f, "reason=basis_unknown")
 }
