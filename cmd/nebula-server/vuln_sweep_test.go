@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -283,5 +284,155 @@ func TestSweepReopensFalsePositiveWithoutKernelData(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "reason=basis_unknown") {
 		t.Fatalf("log does not name the basis_unknown re-open:\n%s", logs.String())
+	}
+}
+
+// vdStoreFalsePositive stores a false positive of f bound to the version NOS
+// knew before (clsOld). The decider would refuse a decision on a basis that
+// cannot be judged, so the state is set directly.
+func vdStoreFalsePositive(t *testing.T, x *vdEnv, f vulnstore.Finding) {
+	t.Helper()
+	m := vulnstore.MarkFalsePositive{By: "alice", Category: vulnstore.CategoryVendorDisputed,
+		Reason: "vendor disputes it", BasisVersion: clsOld}
+	if err := x.e.svc.store.SetFalsePositive(context.Background(), f.Key, m, x.e.audit); err != nil {
+		t.Fatalf("set false positive: %v", err)
+	}
+	if got := x.state(t, f); got != vulnstore.StateFalsePositive {
+		t.Fatalf("state after the decision = %s, want false_positive", got)
+	}
+}
+
+// vdSweepReopens runs one sweep and checks that the finding re-opened and
+// that the log names the given reason.
+func vdSweepReopens(t *testing.T, x *vdEnv, f vulnstore.Finding, reason string) {
+	t.Helper()
+	var logs bytes.Buffer
+	x.e.svc.log = slog.New(slog.NewTextHandler(&logs, nil))
+	if _, err := x.e.svc.sweepOnce(context.Background()); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if got := x.state(t, f); got != vulnstore.StateOpen {
+		t.Fatalf("state after sweep = %s, want open; log:\n%s", got, logs.String())
+	}
+	if !strings.Contains(logs.String(), reason) {
+		t.Fatalf("log does not name %s:\n%s", reason, logs.String())
+	}
+}
+
+// TestSweepReopensFalsePositiveWithMalformedFixedVersion: a malformed episode
+// fixed version from the feed is a permanent error for this one finding. It
+// is not transient, so the false positive re-opens as basis_unknown instead of
+// staying suppressed for good (fail open, D6).
+func TestSweepReopensFalsePositiveWithMalformedFixedVersion(t *testing.T) {
+	x := newVDEnv(t, "alice", nil)
+	f := clsFinding(t, x.e, clsRecord("CVE-2026-8920", "openssl", clsOld, clsNew))
+	// The ingest validates the fixed version of a record, so the malformed
+	// episode fix is stored directly, as an older feed version could have left it.
+	if _, err := x.e.db.Exec("UPDATE vuln_findings SET episode_fixed_version = ? WHERE finding_key = ?",
+		"3.0.16 !!malformed", f.Key[:]); err != nil {
+		t.Fatalf("store malformed episode fix: %v", err)
+	}
+	clsSettle(x.e)
+	clsPut(t, x.e, clsRead("r-malfix-"+f.Key.String()[:8], f.Updated.Add(clsLag+time.Minute), true,
+		clsKernel("6.1.119-1"), clsComp("openssl", clsOld)))
+	vdStoreFalsePositive(t, x, f)
+	vdSweepReopens(t, x, f, "reason=basis_unknown")
+}
+
+// TestSweepReopensFalsePositiveWithUnknownEcosystem: an ecosystem NOS has no
+// version scheme for is a permanent error of the finding (fail closed).
+func TestSweepReopensFalsePositiveWithUnknownEcosystem(t *testing.T) {
+	x := newVDEnv(t, "alice", nil)
+	f := clsFinding(t, x.e, clsRecord("CVE-2026-8921", "openssl", clsOld, clsNew))
+	// The ingest rejects such an ecosystem, so the record's ecosystem is
+	// replaced directly. "alpine:" passes the checkable prefix but has no
+	// release, so it has no version scheme (vulnver.SchemeForEcosystem).
+	if _, err := x.e.db.Exec("UPDATE vuln_findings SET record = json_set(record, '$.ecosystem', 'alpine:') WHERE finding_key = ?",
+		f.Key[:]); err != nil {
+		t.Fatalf("store unknown ecosystem: %v", err)
+	}
+	clsSettle(x.e)
+	clsPut(t, x.e, clsRead("r-eco-"+f.Key.String()[:8], f.Updated.Add(clsLag+time.Minute), true,
+		clsKernel("6.1.119-1"), clsComp("openssl", clsOld)))
+	vdStoreFalsePositive(t, x, f)
+	vdSweepReopens(t, x, f, "reason=basis_unknown")
+}
+
+// TestSweepReopensFalsePositiveWhenBasisDoesNotCompare: a NOS version that
+// cannot be compared with the episode fix is a permanent error of the finding
+// (fail closed). The false positive re-opens as basis_unknown.
+func TestSweepReopensFalsePositiveWhenBasisDoesNotCompare(t *testing.T) {
+	x := newVDEnv(t, "alice", nil)
+	f := clsFinding(t, x.e, clsRecord("CVE-2026-8922", "openssl", clsOld, clsNew))
+	clsSettle(x.e)
+	clsPut(t, x.e, clsRead("r-cmp-"+f.Key.String()[:8], f.Updated.Add(clsLag+time.Minute), true,
+		clsKernel("6.1.119-1"), clsComp("openssl", "abc-bad")))
+	vdStoreFalsePositive(t, x, f)
+	vdSweepReopens(t, x, f, "reason=basis_unknown")
+}
+
+// TestSweepKeepsFalsePositiveWhenStoreReadIsCanceled: a deadline that passes
+// while NOS reads the inventory is transient. The false positive stays for
+// this sweep, the log names the basis error (basis_error), and the next sweep
+// judges it again.
+func TestSweepKeepsFalsePositiveWhenStoreReadIsCanceled(t *testing.T) {
+	x := newVDEnv(t, "alice", nil)
+	f := clsFinding(t, x.e, clsRecord("CVE-2026-8923", "openssl", clsOld, clsNew))
+	clsSettle(x.e)
+	clsPut(t, x.e, clsRead("r-dl-"+f.Key.String()[:8], f.Updated.Add(clsLag+time.Minute), true,
+		clsKernel("6.1.119-1"), clsComp("openssl", clsOld)))
+	vdStoreFalsePositive(t, x, f)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	x.e.svc.classifier.betweenReads = func() { <-ctx.Done() }
+	var logs bytes.Buffer
+	x.e.svc.log = slog.New(slog.NewTextHandler(&logs, nil))
+
+	if _, err := x.e.svc.sweepOnce(ctx); err != nil {
+		t.Logf("sweep error (only the review matters here): %v", err)
+	}
+	if got := x.state(t, f); got != vulnstore.StateFalsePositive {
+		t.Fatalf("state after sweep with a canceled read = %s, want false_positive", got)
+	}
+	if !strings.Contains(logs.String(), "basis_error=1") {
+		t.Fatalf("log does not name the basis error:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), "reason=basis_unknown") {
+		t.Fatalf("a canceled read must not re-open as basis_unknown:\n%s", logs.String())
+	}
+}
+
+// TestBasisErrorsFailClosedUnlessTransient: only the named transient errors
+// keep a human state for one sweep (isTransientBasisErr). Every other error,
+// including a malformed stored read, means the basis is unknown.
+func TestBasisErrorsFailClosedUnlessTransient(t *testing.T) {
+	badRead := storeReadErr("latest read", fmt.Errorf("decode: %w", vulninventory.ErrInvalidRead))
+	dbErr := storeReadErr("latest read", errors.New("database is locked"))
+	cases := []struct {
+		name      string
+		err       error
+		transient bool
+	}{
+		{"read race", errVulnReadRace, true},
+		{"deadline", fmt.Errorf("classify: %w", context.DeadlineExceeded), true},
+		{"canceled", fmt.Errorf("classify: %w", context.Canceled), true},
+		{"database read", dbErr, true},
+		{"database read wrapped by a later step", fmt.Errorf("classify: again: %w", dbErr), true},
+		{"malformed stored read", badRead, false},
+		{"no inventory", errVulnNoInventory, false},
+		{"no kernel", errVulnNoKernel, false},
+		{"other ecosystem", errVulnEcosystem, false},
+		{"no ecosystem", errVulnNoEcosystem, false},
+		{"malformed fixed version", fmt.Errorf("classify: episode fixed version: %w", errors.New("bad")), false},
+		{"unknown scheme", fmt.Errorf("classify: ecosystem: %w", errors.New("no scheme")), false},
+		{"compare", fmt.Errorf("classify: compare basis: %w", errors.New("bad")), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isTransientBasisErr(c.err); got != c.transient {
+				t.Fatalf("isTransientBasisErr(%v) = %v, want %v", c.err, got, c.transient)
+			}
+		})
 	}
 }
