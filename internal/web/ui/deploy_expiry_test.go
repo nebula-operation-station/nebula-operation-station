@@ -324,7 +324,8 @@ func TestDeployProposeKeepsTheAddressWhenAPermitMayExist(t *testing.T) {
 		}
 	})
 	t.Run("unusable permit", func(t *testing.T) {
-		prov := &fakeProvision{risk: canonical.RiskHigh, requirement: pb.ApprovalRequirement_APPROVAL_REQUIREMENT_ASSERTION_VERIFIED}
+		prov := &fakeProvision{risk: canonical.RiskHigh, requirement: pb.ApprovalRequirement_APPROVAL_REQUIREMENT_ASSERTION_VERIFIED,
+			images: dpImagesDefault()}
 		e := newDPEnvWith(t, func(o *ui.Options) { o.Deploy = brokenDigestProvision{prov} })
 		code, body, _ := e.do(t, http.MethodPost, "/deployments/propose", gpFormCT, dpForm().Encode())
 		if code != http.StatusBadGateway || !strings.Contains(body, "stays reserved") {

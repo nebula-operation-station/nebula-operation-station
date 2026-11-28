@@ -613,7 +613,11 @@ type deployWizardData struct {
 	Sizes    []deployOption
 	Modules  []deployOption
 	Runbooks []deployOption
-	// Templates are the stored QEMU guests of the node a template may be.
+	// Templates are the VMIDs of the bindable template records of the node
+	// (PV-03h); Images and Digests are those records' catalog IDs and
+	// SHA-256s, so every option belongs to an offered record.
+	Images    []deployOption
+	Digests   []deployOption
 	Templates []deployOption
 
 	Remote, Node, Profile, Network, Pool string
@@ -692,17 +696,6 @@ func (h *Handler) handleDeployWizard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	d.Ready = d.Remote != "" && d.Node != ""
-	if d.Ready {
-		guests, err := h.pve.ListGuests(ctx, d.Remote, pveinventory.GuestFilter{}, 0)
-		if err != nil {
-			h.log.Error("deploy wizard: list guests", "remote", d.Remote, "error", err)
-		}
-		for _, g := range guests {
-			if g.Node == d.Node && g.Kind == guestKindQEMU && !g.Tombstoned && g.Status != "running" {
-				d.Templates = append(d.Templates, deployOption{Value: strconv.FormatUint(g.VMID, 10), Label: strconv.FormatUint(g.VMID, 10) + " " + g.Name})
-			}
-		}
-	}
 	d.Envs = []deployOption{{Value: "DEV", Label: "DEV", Selected: true}, {Value: "QA", Label: "QA"}, {Value: "PROD", Label: "PROD"}}
 	for _, s := range []string{"S", "M", "L", "XL"} {
 		p := deployprofile.Presets[s]
@@ -748,6 +741,12 @@ func (h *Handler) handleDeployWizard(w http.ResponseWriter, r *http.Request) {
 		if d.Pool == "" && !p.Network.DHCP {
 			d.Pool = p.Network.IPAMPool
 		}
+	}
+	if d.Ready {
+		// The image, SHA-256 and template choices are the executor's
+		// bindable records (PV-03h, D4b) for the node and the profile's
+		// storage; a guest without a record is not offered.
+		h.wizardImages(ctx, d)
 	}
 	for _, m := range deployprofile.BootstrapModules {
 		d.Modules = append(d.Modules, deployOption{Value: m, Label: m, Selected: selectedModules[m]})
@@ -1151,7 +1150,9 @@ func (h *Handler) handleDeployPropose(w http.ResponseWriter, r *http.Request) {
 		h.deployInputError(w, "deploy: freeze plan", err)
 		return
 	}
-	tplGen, err := h.templateGeneration(ctx, form)
+	// The template reference is the executor's record for the chosen node,
+	// storage, image, SHA-256 and VMID; the record's generation binds it.
+	tplGen, err := h.templateRecord(ctx, form)
 	if err != nil {
 		h.deployInputError(w, "deploy: template", err)
 		return
@@ -1372,24 +1373,6 @@ func (h *Handler) deployInputError(w http.ResponseWriter, op string, err error) 
 	}
 	h.log.Error(op, "error", err)
 	http.Error(w, "the deployment could not be prepared", http.StatusInternalServerError)
-}
-
-// templateGeneration is the stored incarnation of the chosen template on
-// the target node; the executor checks it against its template record.
-func (h *Handler) templateGeneration(ctx context.Context, d deployForm) (uint64, error) {
-	guests, err := h.pve.ListGuests(ctx, d.Remote, pveinventory.GuestFilter{VMID: d.TemplateVMID}, 0)
-	if err != nil {
-		return 0, err
-	}
-	for _, g := range guests {
-		if g.VMID == d.TemplateVMID && !g.Tombstoned {
-			if g.Node != d.Node || g.Kind != guestKindQEMU {
-				return 0, formError("the template is not a QEMU guest on node " + d.Node)
-			}
-			return g.Generation, nil
-		}
-	}
-	return 0, formError("the template VMID is not in the PVE inventory of this remote")
 }
 
 // deployMismatch lists every difference between what the executor bound

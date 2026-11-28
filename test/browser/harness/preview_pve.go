@@ -174,6 +174,21 @@ func (previewProvision) ProposePVEGuestProvision(_ context.Context, in *pb.Propo
 			ChallengeExpiryUnix: time.Now().Add(5 * time.Minute).Unix(), RequestOptionsJson: []byte(`{"challenge":"cHJldmlldw"}`)}}, nil
 }
 
+// ListPVEImages lists the one catalog entry the preview deploys and its
+// prepared template record on the preview's remote, node and storage, so
+// the wizard (which takes templates only from executor records, PV-03h)
+// accepts the seeded deployment. Generation 1 is the template's generation.
+func (previewProvision) ListPVEImages(context.Context, *pb.ListPVEImagesRequest, ...grpc.CallOption) (*pb.ListPVEImagesResponse, error) {
+	const file = "debian-12-genericcloud-amd64.qcow2"
+	return &pb.ListPVEImagesResponse{CatalogSequence: 1, CatalogDigest: sha256Hex("preview catalog"),
+		Images: []*pb.PVEImage{{Trust: "signed", CatalogSequence: 1, CatalogDigest: sha256Hex("preview catalog"),
+			Image: &pb.PVECatalogImage{Id: "debian-12", Os: "debian", Release: "12", Arch: "amd64",
+				Url: "https://cloud.debian.org/images/cloud/bookworm/latest/" + file, Sha256: sha256Hex(file), DiskFormat: "qcow2"}}},
+		Templates: []*pb.PVETemplateRecord{{RemoteId: previewClusterID, Node: "pve-b", Storage: "local-lvm", ImageId: "debian-12",
+			Trust: "signed", Vmid: previewTemplate, Generation: 1, SourceSha256: sha256Hex(file), ConfigDigest: sha256Hex("template config"),
+			TrustGeneration: 2, ExecutionId: "preview-prepare-1", PreparedAtUnix: time.Now().Add(-24 * time.Hour).Unix()}}}, nil
+}
+
 func (previewProvision) SubmitAssertion(context.Context, *pb.SubmitAssertionRequest, ...grpc.CallOption) (*pb.SubmitAssertionResponse, error) {
 	return &pb.SubmitAssertionResponse{}, nil
 }
