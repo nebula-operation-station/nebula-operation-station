@@ -1917,13 +1917,18 @@ The rest of this section describes the parts that exist.
   not confirm is shown as "closed by Hermes, not confirmed by NOS", unless a
   hold guard applies (see *Held closures*), and then it is held for an admin.
 - **Ageing is decided but not applied yet.** See *Ageing* below.
-- **Maintainer decisions are refused for now.** The forms for accepting a
-  risk, marking a false positive, confirming or discarding a held closure
-  and resetting a feed mark are shown to the maintainer. Submitting one
-  fails with "vulnerability decisions need an executor-verified security
-  key assertion, which this executor does not offer": the executor has no
-  call yet that binds a security key assertion to such a decision
-  (planned).
+- **Maintainer decisions need a fresh security key assertion**
+  (previously: "Maintainer decisions are refused for now"). The five
+  decisions work: accepting a risk, marking a false positive, confirming a
+  held closure, discarding a held closure and resetting a feed mark. Each
+  submission asks the maintainer for a fresh security key assertion,
+  discarding a held closure included. The server binds the challenge to the
+  maintainer and to that one decision; it is valid once and for 2 minutes.
+  The decision is applied only when the executor accepts the assertion as
+  coming from the maintainer's own security key, and it is written together
+  with its audit line. A refused submission changes nothing. The server, not
+  the executor, checks this binding; what that leaves open is listed under
+  *Not protected* in [`docs/threat-model.md`](../threat-model.md).
 - **Priority uses defaults.** Exposure and host criticality are not
   connected yet. The tier is computed as `vu-prio-v1` with exposure
   "unknown" (0.7) and criticality "unset" (counted as HIGH).
@@ -2323,9 +2328,9 @@ the run.
 
 Each submission needs a **fresh security key assertion**, bound to that
 one decision. Hermes can never set a human state. Its "likely false
-positive" flag only sorts and annotates. As listed at the top of this
-section, this release refuses every such submission; the rules above are
-what the forms already check.
+positive" flag only sorts and annotates. How the assertion is checked is
+listed at the top of this section (previously: "this release refuses every
+such submission").
 
 **Held closures.** Nebula holds a closure for an admin instead of
 applying it when:
