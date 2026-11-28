@@ -432,6 +432,9 @@ is required.
 
 ## Follow-up tickets
 
+Implementation status (2026-11-28): Variant A is built (chain va, #903, #909, #913, #916, #917).
+Follow-ups 4 and 5 are done by #909, follow-up 6 by #913.
+
 ### If Variant A is chosen
 
 0. **Maintainer decisions first.** (a) Accept the three limits above in
