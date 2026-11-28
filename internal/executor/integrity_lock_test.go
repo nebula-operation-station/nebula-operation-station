@@ -658,6 +658,79 @@ func TestIntegrityLegacyOpenLockIsAckable(t *testing.T) {
 	}
 }
 
+// TestIntegrityLockKeepsLocalImageEntriesLocked pins the maintainer
+// decision of 2026-11-28 (ADR 0008 amendment 2 I1): AddPVELocalImage and
+// RemovePVELocalImage are locked, so with an open locking finding both are
+// refused with ErrIntegrityLocked and the local entries stay as they were.
+func TestIntegrityLockKeepsLocalImageEntriesLocked(t *testing.T) {
+	for _, m := range []string{pb.ExecutorService_AddPVELocalImage_FullMethodName, pb.ExecutorService_RemovePVELocalImage_FullMethodName} {
+		locked, ok := integrityLockedMethods[m]
+		if !ok || !locked {
+			t.Fatalf("%s: classified %v, locked %v; want locked (ADR 0008 amendment 2 I1)", m, ok, locked)
+		}
+	}
+
+	e := newLocalImagesEnv(t)
+	// One existing entry, added before the lock, for the removal.
+	if _, reached, err := e.add(localTestAdminUID, localRockyProto()); err != nil || !reached {
+		t.Fatalf("add before lock: %v %v", reached, err)
+	}
+	before, err := os.ReadFile(e.localFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	statePath := filepath.Join(t.TempDir(), IntegrityCheckStateFile)
+	d := IntegrityDeviation{Path: "/usr/bin/nebula-executor", Class: integrity.ClassBinary, Status: integrity.StatusDifferent, Reason: integrity.ReasonSHA256, Locks: true}
+	lock := IntegrityLock{}
+	mergeIntegrityFindings(&lock, IntegrityRun{Started: time.Date(2026, 11, 28, 9, 0, 0, 0, time.UTC), Locking: 1, Deviations: []IntegrityDeviation{d}})
+	if err := storeIntegrityCheckState(statePath, IntegrityCheckState{Lock: lock}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.SetIntegrityCheck(IntegrityCheckConfig{StatePath: statePath,
+		Flavour: func(context.Context) (string, error) { return "deb:amd64", nil }}); err != nil {
+		t.Fatal(err)
+	}
+	if !e.svc.IntegrityLockOpen() {
+		t.Fatal("fixture lock is not open")
+	}
+
+	client := pb.NewExecutorServiceClient(integrityRPCConn(t, e.svc, peercred.RoleAdmin))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	const newID = "local-debian-12-amd64"
+	added := localRockyProto()
+	added.Id, added.Os, added.Release = newID, "debian", "12"
+	_, err = client.AddPVELocalImage(ctx, &pb.AddPVELocalImageRequest{Image: added})
+	if !isIntegrityLocked(err) || status.Convert(err).Message() != ErrIntegrityLocked.Error() {
+		t.Fatalf("add while locked: %v", err)
+	}
+	_, err = client.RemovePVELocalImage(ctx, &pb.RemovePVELocalImageRequest{ImageId: imgLocalID})
+	if !isIntegrityLocked(err) || status.Convert(err).Message() != ErrIntegrityLocked.Error() {
+		t.Fatalf("remove while locked: %v", err)
+	}
+
+	// Nothing written or removed.
+	if _, ok := e.catalog(t).Lookup(newID); ok {
+		t.Fatal("refused add is served")
+	}
+	if _, ok := e.catalog(t).Lookup(imgLocalID); !ok {
+		t.Fatal("refused remove dropped the entry")
+	}
+	after, err := os.ReadFile(e.localFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("the local entries file changed while locked")
+	}
+	logs := e.logs.String()
+	if strings.Contains(logs, newID) || strings.Contains(logs, `"kind":"pve_local_image_removed"`) {
+		t.Fatalf("a handler ran while locked: %s", logs)
+	}
+}
+
 func itoa(i int) string { return strconv.Itoa(i) }
 
 // auditHas reports a record of kind with key=value.

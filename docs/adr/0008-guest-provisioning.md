@@ -1698,17 +1698,22 @@ host is in D2.
     `integrity_lock.go:318-320`).
   - `ProposePVEImagePrepare`: **`false`**, as the other PVE proposals
     (`ProposePVEGuestPower` to `ProposePVEGuestProvision`,
-    `integrity_lock.go:425-427`); the table comment keeps proposals
+    `integrity_lock.go:432-434`); the table comment keeps proposals
     available (`integrity_lock.go:295-300`). Follows from the same rule.
-  - `AddPVELocalImage`, `RemovePVELocalImage`: **open for the owner.** They
-    dispatch nothing and use no NOS credential, so the table rule gives
-    `false`, as for admin bookkeeping such as `AddPrivateRegistry`
-    (`integrity_lock.go:429`) and `AddSigner` (`:387`). Against that, a
-    local entry widens what a later commit may download while the lab is
-    locked for a possibly changed binary. Proposal (Claude, not decided):
-    `false`, because the download itself runs only through the locked
-    `CommitPVEImagePrepare`. PV-03b writes the entries and the test once
-    the owner decides; until then the missing entry refuses while locked.
+  - `AddPVELocalImage`, `RemovePVELocalImage`: **`true`** (locked),
+    decided by the maintainer on 2026-11-28 (see the Changelog)
+    (previously: "open for the owner"). Entries
+    `integrity_lock.go:330-331`, pinned by
+    `TestIntegrityLockKeepsLocalImageEntriesLocked`. They dispatch nothing
+    and use no NOS credential, so the table rule gives `false`, as for
+    admin bookkeeping such as `AddPrivateRegistry`
+    (`integrity_lock.go:437`) and `AddSigner` (`:393`). Against that, and
+    decisive: a local entry widens what a later commit may download while
+    the lab is locked for a possibly changed binary. (Previously: proposal
+    Claude `false`, not decided, because the download itself runs only
+    through the locked `CommitPVEImagePrepare`; replaced by the decision.
+    Previously also: "PV-03b writes the entries and the test once the owner
+    decides; until then the missing entry refuses while locked".)
 - Threat model (PV-03k): the server's new HIGH proposal path, the
   admin-only local entries and the catalog trust chain.
 - (Claude, round 1) The release package installs the staged catalog pair
@@ -1749,3 +1754,5 @@ host is in D2.
   sentence that the lab result "confirms" the 500 removed. PV-03a and
   PV-03b stated as independent of the exact status. PV-03b gains the
   cases 500 with another VMID, another node or extra text, each refused.
+- 2026-11-28: I1 entries for AddPVELocalImage/RemovePVELocalImage decided
+  by the maintainer: true.
