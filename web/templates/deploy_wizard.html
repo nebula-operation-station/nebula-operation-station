@@ -62,16 +62,24 @@
     <fieldset>
       <legend>OS</legend>
       <label>Image (catalog ID)
-        <input type="text" name="image" value="{{$d.Image}}" maxlength="64" required pattern="[a-z0-9][a-z0-9._\-]{0,63}"></label>
-      <label>Prepared template on this node (VMID)
+        <select name="image" required>
+          <option value="">— choose —</option>
+          {{range $d.Images}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>
+          {{end}}
+        </select></label>
+      <label>Image SHA-256 the template was prepared from
+        <select name="template_sha256" required>
+          <option value="">— choose —</option>
+          {{range $d.Digests}}<option value="{{.Value}}">{{.Label}}</option>
+          {{end}}
+        </select></label>
+      <label>Prepared template on this node (VMID, record: image · trust · SHA-256 · generation)
         <select name="template_vmid" required>
           <option value="">— choose —</option>
           {{range $d.Templates}}<option value="{{.Value}}">{{.Label}}</option>
           {{end}}
         </select></label>
-      <label>Image SHA-256 the template was prepared from
-        <input type="text" name="template_sha256" maxlength="64" required pattern="[0-9a-fA-F]{64}" autocomplete="off" class="mono"></label>
-      <p class="hint">The executor binds the template record (pve.image.prepare) at exactly this VMID, incarnation and image digest; a template that changed since it was prepared is refused.</p>
+      <p class="hint">Only prepared templates are offered. The VMID must be the record of the chosen node, storage, image and SHA-256; the executor binds that record's generation and refuses a template that changed since it was prepared. Prepare a missing template on the <a href="/deploy/images">Images</a> page.</p>
     </fieldset>
     <fieldset>
       <legend>Size</legend>
