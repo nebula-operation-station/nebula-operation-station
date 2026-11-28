@@ -47,22 +47,26 @@ before anything is spooled.
 | PVE pages and the PVE part of the inventory chart | Available | `/pve`, `/pve/<id>`, `/inventory/chart` |
 | Read leases and live values | Available | `/leases`, `/pve/<id>` |
 | Deploy profiles (saved presets; nothing is deployed from them today) | Available | `/deploy` |
-| Guest provisioning | **Not available:** the pages exist, every proposal is refused | [Guest provisioning](#guest-provisioning) |
-| Guest power: start, graceful shutdown, hard stop | **Not available:** no controls, the routes answer 404 | none |
-| Guest snapshots: create, delete, rollback | **Not available:** no controls, the routes answer 404 | none |
+| Image preparation and guest provisioning | **Available, with a gap:** prepare a template on the Images page, then provision from the wizard; cloning may need a token privilege the action token can lack | [Guest provisioning](#guest-provisioning) |
+| Guest power: start, graceful shutdown, hard stop | **Available:** Power section on the inventory chart; each action is proposed, then approved on its proposal page | `/inventory/chart` (Power section), `/pve/guests/power/<digest>` (proposal) |
+| Guest snapshots: create, delete, rollback | **Available:** each action is proposed, then approved on its proposal page | `/pve/guests/snapshots` |
 | Guest backup, intra-cluster migration, node reboot | **Not available:** executor code only, no RPC, page or CLI command | none |
 | Guest configuration changes | **Planned** | none |
 
-NOS changes nothing on PVE today. The actions are open work under ADR 0006
-phase 2 and, for provisioning, ADR 0008.
+NOS changes PVE only through approved actions: image preparation and guest
+provisioning (ADR 0008), and guest power and snapshots (ADR 0006 phase 2).
+Backup, migration and node reboot remain open work under ADR 0006 phase 2.
 
-**Guest power and snapshots.** The executor has both actions and the web UI
-has their code, but `nebula-server` does not set the UI options for them: the
-chart shows no Power section, and `/pve/guests/power` and
-`/pve/guests/snapshots` answer 404. Turning the pages on would not be enough.
-The executor lets the server role propose these actions but only the local
-admin role commit them, and the `nebula` CLI has no command for that, so no
-approval flow exists for them yet.
+**Guest power and snapshots.** `nebula-server` sets both actions
+(`cmd/nebula-server/main.go:643-644`), the routes are mounted
+(`internal/web/ui/ui.go:727-735`), and the inventory chart (`/inventory/chart`)
+builds the Power section only for the chart page with PVE nodes:
+`if data.Content == "chart" && data.Chart != nil && len(data.Chart.PVENodes) > 0`
+(`internal/web/ui/ui.go:1086`). The PVE detail page `/pve/<id>` does not
+show it. Each action
+is proposed, shown with the executor's binding and risk, then approved on its
+proposal page and run. The `nebula` CLI has no power or snapshot command of
+its own. (Previously: "not available, the routes answer 404".)
 
 ## Creating a least-privilege PVE API token
 
@@ -175,9 +179,8 @@ storage deletion or HA-configuration privileges belong to either token.
 
 ### NOS automation key (guest provisioning)
 
-[Guest provisioning](#guest-provisioning) is not available today, so nothing
-needs this key yet. The executor already checks it, before it looks at the
-template.
+[Guest provisioning](#guest-provisioning) needs this key. The executor checks
+it before it looks at the template.
 
 Guest provisioning (ADR 0008) installs exactly one SSH public key into a new
 guest: the NOS automation key. The executor accepts only the keyring
@@ -594,26 +597,74 @@ for exactly that. **Revoke** stops the live reads within about 10 seconds.
 
 ## Guest provisioning
 
-**Not available today.** The deploy pages are there (`/deploy` for profiles,
-`/deployments` for runs, the wizard at `/deployments/new`, and **Deploy here**
-on the chart's nodes of active remotes), but no provisioning can get past its
-proposal.
+The executor clones only a template it prepared and recorded itself. The
+flow has four steps:
 
-The executor clones only a template it prepared and recorded itself, and
-nothing in a release can start that preparation: there is no RPC, page or CLI
-command for it. Every proposal that gets that far is therefore refused with:
+1. **Catalog.** The signed image catalog (`image-catalog.json` and its
+   `image-catalog.json.sig`) is staged into the release bundle when a release
+   is built with `nebula-release-stage --catalog FILE --catalog-sig FILE`. The
+   executor loads it from the bundle at
+   start, verifies it against the active release roots and refuses an older
+   catalog than the one it loaded before. Each entry names a vendor cloud-image
+   URL (https) and its SHA-256.
+2. **Local entries (optional).** On the executor host, `nebula pve image add
+   <local-id> --os OS --release RELEASE --arch amd64|arm64 --url https://...
+   --sha256 HEX --disk-format qcow2|raw` adds your own image. The ID must start
+   with `local-`. `nebula pve image remove <local-id>` removes it and `nebula pve
+   image list` shows the signed and local entries. The executor stores local
+   entries itself, so they survive a restart. A local entry carries trust
+   `Local`; preparing it is HIGH, like any other image.
+3. **Prepare on the Images page** (`/deploy/images`). Pick a catalog or local
+   entry, the remote, the node and the storage, and propose the preparation
+   (action `pve.image.prepare`, risk HIGH). Approve it with your security key on
+   the page. If the policy requires CLI approval instead, run `nebula approve`
+   on the executor host, then **Run** on the page. The executor downloads the
+   image with the catalog SHA-256, makes a template from it and records the
+   VMID, the generation and the SHA-256.
+4. **Provision in the wizard** (`/deployments/new`). Template VMID, OS image
+   and template SHA-256 are drop-downs that offer only prepared records and the
+   catalog entries they came from. A stopped guest without a record is not
+   offered. The generation is the executor's record generation.
 
-```text
-the executor refused: pve guest provision: the template is not prepared or changed; prepare it again
-```
+The deploy pages are `/deploy` (profiles, and the Images page under it),
+`/deployments` (runs) and the wizard at `/deployments/new`. **Deploy here** on
+the chart's nodes of active remotes is a second way into the wizard.
 
-The refusal comes before any approval: no permit is created, no VMID stays
-reserved and PVE is not changed. A static address from the IPAM is the one
-thing that stays: the message then adds that the address stays reserved, and
-you clear it on the network page. Trying again or choosing another template
-does not help, and neither do more privileges on the PVE side. A second gap
-waits behind this one: provisioning runs with the action token, which may hold
-only `VM.PowerMgmt`, and that is not enough to clone a guest.
+**Missing or invalid catalog.** If the signed catalog is missing, its
+signature does not verify, or it is older than the one loaded before, the
+executor still starts but loads no signed catalog, and the failure is written
+to the audit log. The list call still succeeds: `CatalogListing` skips the
+signed entries and returns the local ones (`internal/executor/pve_images.go:360`),
+so the Images page stays available and local entries keep working there and in
+the wizard. A signed image is refused when you propose its preparation with
+"image is not in the catalog" (`ErrPveImageUnknown`, `internal/executor/pve_images.go:576-578`),
+and the wizard offers no template built from it: the record is counted as
+prepared from an image the catalog no longer lists (`internal/web/ui/deploy_images.go:238-255`).
+The messages "nothing can be prepared" and "no prepared template can be
+chosen" (`internal/web/ui/deploy_images.go:476`, `deploy_images.go:229`) appear
+only when the executor's list call fails, its answer is refused
+(`internal/web/ui/deploy_images.go:143-151`) or the server has no image
+capability (`internal/web/ui/deploy_images.go:138-141`); they do not mean a
+missing catalog. Nothing is persisted on these paths. Fix the release bundle
+and restart the executor.
+
+**Preparing again.** A template that is gone from PVE, changed outside NOS, or
+prepared for a remote that was re-pinned is prepared again: propose and approve
+a new preparation on the Images page. The executor records it with the next
+generation. While the old record still binds (template present and unchanged,
+catalog still lists the image, remote unchanged), a new preparation is refused
+with "image is already prepared on this storage". If the template cannot be
+read (transport error, timeout, server error or malformed answer) or the remote
+is not active, the proposal is refused and the record stays as it is.
+
+A missing or unusable template is refused before any permit is created, before
+a VMID is reserved and before PVE is changed. A static address from the IPAM is
+the one thing that can stay: the message then adds that the address stays
+reserved, and you clear it on the network page.
+
+**Open gap.** Provisioning runs with the action token, which may hold only
+`VM.PowerMgmt`, and that is not enough to clone a guest. Until that is closed,
+a provisioning can fail when PVE refuses the clone.
 
 ## Linking guests to hosts
 
@@ -741,5 +792,4 @@ history is merely evidence of a past run.
 | `add`/`rotate-token`/`remove`/`repin` refuse to run | The executor vault is locked: run `nebula unlock` on the executor host first. |
 | `the stored cluster CA of the remote is missing or unusable` | The vault entry of a leaf-only cluster's CA is lost or damaged. Copy `/etc/pve/pve-root-ca.pem` out of band and run `nebula pve remote repin <id> --ca-file pve-root-ca.pem`, typing the unchanged current pin as the new fingerprint (see [Restoring a missing or unusable stored cluster CA](#restoring-a-missing-or-unusable-stored-cluster-ca)). |
 | CLI cannot dial the executor | Check `NEBULA_EXECUTOR_SOCKET` and that the socket is served by the `NEBULA_EXECUTOR_USER` user (default `nebula-executor`). |
-| `the template is not prepared or changed; prepare it again` on the deployment wizard | Expected today: no release can prepare a template (see [Guest provisioning](#guest-provisioning)). PVE was not changed; clear a static address on the network page if the message says it stays reserved. |
-| No Power section on the chart; `/pve/guests/power` or `/pve/guests/snapshots` answers 404 | Expected today: guest power and snapshots are not available (see [What you can use today](#what-you-can-use-today)). |
+| `the template is not prepared or changed; prepare it again` on the deployment wizard | The template for this image and node is missing or was changed, or the catalog now lists a different SHA-256 for the image (`internal/executor/pve_images.go:781-783`). A re-pinned remote does not give this message: it gives `the node, storage or remote changed; propose again` (`internal/executor/pve_rpc.go:1194-1195`), and the template must be prepared again in the same way. PVE was not changed. Prepare it again on the Images page (`/deploy/images`, see [Guest provisioning](#guest-provisioning)). Clear a static address on the network page if the message says it stays reserved. |
