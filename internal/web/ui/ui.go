@@ -298,6 +298,8 @@ type Handler struct {
 	deployIPAM    DeployIPAM
 	deployBatches DeployBatches
 	deployRuns    *deployRuns
+	// imagePrepares are the proposed image preparations (deploy_images.go).
+	imagePrepares *imagePrepares
 	// containerBatches proposes container update and rollback batches.
 	containerBatches ContainerBatches
 	// containerTagPolicy compares tags for a tag change; nil offers
@@ -425,6 +427,7 @@ func New(o Options) (*Handler, error) {
 		deployIPAM:           o.DeployIPAM,
 		deployBatches:        o.DeployBatches,
 		deployRuns:           newDeployRuns(log),
+		imagePrepares:        newImagePrepares(),
 		containerBatches:     o.ContainerBatches,
 		containerTagPolicy:   o.ContainerTagPolicy,
 		containerDefinitions: o.ContainerDefinitions,
@@ -513,6 +516,7 @@ var pageFiles = map[string]string{
 	"runbook":             "runbook.html",
 	"runbook_edit":        "runbook_edit.html",
 	"deploy_profiles":     "deploy_profiles.html",
+	"deploy_images":       "deploy_images.html",
 	"deploy_profile":      "deploy_profile.html",
 	"deploy_profile_edit": "deploy_profile_edit.html",
 	"deploy_wizard":       "deploy_wizard.html",
@@ -553,6 +557,7 @@ var pagePartials = map[string][]string{
 	"deploy_wizard":       {"deploy_tabs.html"},
 	"deploy_runs":         {"deploy_tabs.html"},
 	"deploy_run":          {"deploy_tabs.html"},
+	"deploy_images":       {"deploy_tabs.html"},
 	// The vulnerabilities pages share banners, labels and tables.
 	"vuln":         {"vuln_parts.html"},
 	"vuln_cve":     {"vuln_parts.html"},
@@ -634,6 +639,12 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("POST /runbooks/trust/commit", h.handleRunbookTrustCommit)
 	// Deploy profiles (ADR 0008 section 1, PV-04).
 	mux.HandleFunc("GET /deploy", h.handleDeployProfiles)
+	mux.HandleFunc("GET /deploy/images", h.handleDeployImages)
+	// Image preparation (PV-03h, D1a): proposed with the form, approved
+	// with the security key (schedules.js) or the CLI and a run.
+	mux.HandleFunc("POST /deploy/images/prepare", h.handleImagePrepare)
+	mux.HandleFunc("POST /deploy/images/approve", h.handleImagePrepareApprove)
+	mux.HandleFunc("POST /deploy/images/run", h.handleImagePrepareRun)
 	mux.HandleFunc("GET /deploy/new", h.handleDeployProfileEdit)
 	mux.HandleFunc("GET /deploy/{slug}", h.handleDeployProfile)
 	mux.HandleFunc("GET /deploy/{slug}/edit", h.handleDeployProfileEdit)
@@ -852,6 +863,8 @@ type pageData struct {
 	Runbooks *runbooksData
 	// DeployProfiles is the data of the deploy profile pages.
 	DeployProfiles *deployProfilesData
+	// DeployImages is the data of the Images page under /deploy (PV-03h).
+	DeployImages *deployImagesData
 	// Modules is the data of the module pages.
 	Modules *modulesData
 	// Network is the data of the network pages.
