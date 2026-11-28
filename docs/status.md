@@ -1,6 +1,6 @@
 # Project status
 
-Last updated 2026-11-27 (evening; previously 2026-11-26 evening)
+Last updated 2026-11-28 (PV-03i round 1: operator guide and this page fixed to the code; previously 2026-11-27 evening)
 
 This page is the short, frequently updated view of where Nebula Operation Station stands. The
 [README roadmap](../README.md#roadmap) gives the area overview; the ADRs in [docs/adr](adr/) hold
@@ -65,7 +65,7 @@ maintainer decisions with a login assertion (ADR 0011 Q4).
 | Help assistant | panel routes mounted; the `internal/helpassist` libraries are not imported | `internal/web/ui/assistant.go`, `internal/web/ui/ui.go` |
 | Ops agent | yes: API wired; projection gets stored findings (#883) and listeners from stored socket facts (#880); Ops tab set (`o.AssistantOps`, #887); end-to-end test (#895) | `cmd/nebula-server/ops_assistant.go` (`wireOpsAssistant`), `cmd/nebula-server/main.go:672` |
 | Integrity monitoring | partly: the server self-check (I1) runs at start and on an interval and serves `/integrity/status` with the executor status labelled by source (#893); `fim.scan` is proposed and run through read leases (#896); the notification gate is wired to the notifier (#906). `fim.scan` result parsing waits on fi06 (D6 key) | `cmd/nebula-server/integrity.go` |
-| Image preparation (PV-03) | not yet: executor RPCs, handlers and catalog load are merged (`ProposePVEImagePrepare`, `CommitPVEImagePrepare`, `ListPVEImages`), CLI for local entries merged; server forwarding is #910 (open) | `proto/nebula/executor/v1/executor.proto:573-578` |
+| Image preparation (PV-03) | yes: the Images page (`/deploy/images`) proposes, approves and runs preparations, and the wizard offers the prepared records; server forwarding merged (#910, PV-03g) (previously: "not yet, server forwarding is #910 (open)") | `cmd/nebula-server/executor.go` (`ProposePVEImagePrepare`, `CommitPVEImagePrepare`, `ListPVEImages`), `internal/web/ui/deploy_images.go` |
 
 Not re-checked in this pass: release 0.9, approval ergonomics. The
 [wiring audit](implementation/wiring-audit.md) (2026-11-21) still lists the network device pages
