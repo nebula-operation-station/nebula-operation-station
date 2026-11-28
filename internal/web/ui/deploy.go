@@ -613,8 +613,9 @@ type deployWizardData struct {
 	Sizes    []deployOption
 	Modules  []deployOption
 	Runbooks []deployOption
-	// Images are the catalog IDs and Digests the catalog SHA-256s (PV-03h);
-	// Templates are the VMIDs of the prepared template records of the node.
+	// Templates are the VMIDs of the bindable template records of the node
+	// (PV-03h); Images and Digests are those records' catalog IDs and
+	// SHA-256s, so every option belongs to an offered record.
 	Images    []deployOption
 	Digests   []deployOption
 	Templates []deployOption
@@ -695,11 +696,6 @@ func (h *Handler) handleDeployWizard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	d.Ready = d.Remote != "" && d.Node != ""
-	if d.Ready {
-		// The image, SHA-256 and template choices are the executor's
-		// records (PV-03h, D4b); a guest without a record is not offered.
-		h.wizardImages(ctx, d)
-	}
 	d.Envs = []deployOption{{Value: "DEV", Label: "DEV", Selected: true}, {Value: "QA", Label: "QA"}, {Value: "PROD", Label: "PROD"}}
 	for _, s := range []string{"S", "M", "L", "XL"} {
 		p := deployprofile.Presets[s]
@@ -745,6 +741,12 @@ func (h *Handler) handleDeployWizard(w http.ResponseWriter, r *http.Request) {
 		if d.Pool == "" && !p.Network.DHCP {
 			d.Pool = p.Network.IPAMPool
 		}
+	}
+	if d.Ready {
+		// The image, SHA-256 and template choices are the executor's
+		// bindable records (PV-03h, D4b) for the node and the profile's
+		// storage; a guest without a record is not offered.
+		h.wizardImages(ctx, d)
 	}
 	for _, m := range deployprofile.BootstrapModules {
 		d.Modules = append(d.Modules, deployOption{Value: m, Label: m, Selected: selectedModules[m]})

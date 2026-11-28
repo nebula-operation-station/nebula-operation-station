@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -89,8 +90,50 @@ func safeHTTPSLink(raw string) string {
 	return raw
 }
 
+const (
+	// maxPVECatalogEntries bounds the catalog entries taken from the
+	// executor's ListPVEImages answer.
+	maxPVECatalogEntries = 256
+	// maxPVETemplateRecords bounds the template records taken from it.
+	maxPVETemplateRecords = 1024
+	// maxPVEImageText bounds every string of the answer (the longest is a
+	// catalog URL).
+	maxPVEImageText = 2048
+)
+
+// errPVEImagesAnswer marks an executor answer over the limits; the page and
+// the wizard then treat the catalog as not available.
+var errPVEImagesAnswer = errors.New("executor image answer over the limits")
+
+// checkPVEImagesAnswer refuses an answer with too many entries or records,
+// or with a string that is too long or not UTF-8.
+func checkPVEImagesAnswer(resp *pb.ListPVEImagesResponse) error {
+	if n := len(resp.GetImages()); n > maxPVECatalogEntries {
+		return fmt.Errorf("%w: %d catalog entries", errPVEImagesAnswer, n)
+	}
+	if n := len(resp.GetTemplates()); n > maxPVETemplateRecords {
+		return fmt.Errorf("%w: %d template records", errPVEImagesAnswer, n)
+	}
+	strs := []string{resp.GetCatalogDigest()}
+	for _, img := range resp.GetImages() {
+		c := img.GetImage()
+		strs = append(strs, c.GetId(), c.GetOs(), c.GetRelease(), c.GetArch(), c.GetUrl(), c.GetSha256(), c.GetDiskFormat(), img.GetTrust())
+	}
+	for _, t := range resp.GetTemplates() {
+		strs = append(strs, t.GetRemoteId(), t.GetNode(), t.GetStorage(), t.GetImageId(), t.GetTrust(), t.GetSourceSha256(),
+			t.GetConfigDigest(), t.GetExecutionId())
+	}
+	for _, s := range strs {
+		if len(s) > maxPVEImageText || !utf8.ValidString(s) {
+			return fmt.Errorf("%w: a string is too long or not UTF-8", errPVEImagesAnswer)
+		}
+	}
+	return nil
+}
+
 // loadPVEImages asks the executor for the catalog and the records. An
-// error or a missing capability leaves Available false.
+// error, an answer over the limits or a missing capability leaves Available
+// false.
 func (h *Handler) loadPVEImages(ctx context.Context) pveImagesView {
 	images, ok := h.deploy.(DeployImages)
 	if !ok || images == nil {
@@ -99,6 +142,10 @@ func (h *Handler) loadPVEImages(ctx context.Context) pveImagesView {
 	resp, err := images.ListPVEImages(ctx, &pb.ListPVEImagesRequest{})
 	if err != nil {
 		h.log.Error("deploy images: list", "error", err)
+		return pveImagesView{}
+	}
+	if err := checkPVEImagesAnswer(resp); err != nil {
+		h.log.Error("deploy images: executor answer refused", "error", err)
 		return pveImagesView{}
 	}
 	v := pveImagesView{Available: true, CatalogSequence: resp.GetCatalogSequence(), CatalogDigest: resp.GetCatalogDigest()}
@@ -146,32 +193,70 @@ func (h *Handler) templateRecord(ctx context.Context, d deployForm) (uint64, err
 	for _, t := range v.Templates {
 		if t.Remote == d.Remote && t.Node == d.Node && t.Storage == d.Storage && t.Image == d.Image &&
 			t.SourceSHA256 == d.TemplateSHA256 && t.VMID == d.TemplateVMID {
+			if _, ok := v.catalogEntry(t); !ok {
+				return 0, formError("the template was prepared from an image SHA-256 the catalog no longer lists: prepare it again on the Images page")
+			}
 			return t.Generation, nil
 		}
 	}
 	return 0, formError("the template is not a prepared record for this node, storage, image and SHA-256: prepare it on the Images page first")
 }
 
-// wizardImages fills the wizard's choices from the executor (PV-03h, D4b):
-// the catalog IDs, the catalog SHA-256s, and the VMIDs of the prepared
-// template records of the chosen node. Without the executor's answer the
-// wizard offers no template.
+// catalogEntry returns the catalog entry the record t was prepared from:
+// same image ID and the SHA-256 the catalog lists today. The executor binds
+// only such a record (BindTemplate compares the record's SHA-256 with the
+// catalog), so a record without one cannot be provisioned from.
+func (v pveImagesView) catalogEntry(t pveTemplateRow) (pveImageRow, bool) {
+	for _, img := range v.Images {
+		if img.ID == t.Image && img.SHA256 == t.SourceSHA256 {
+			return img, true
+		}
+	}
+	return pveImageRow{}, false
+}
+
+// wizardImages fills the wizard's choices from the executor (PV-03h, D4b).
+// Every choice comes from a template record that can be bound: a record of
+// the chosen remote and node, on the profile's storage when one is set,
+// whose image and SHA-256 the catalog lists today. The image and SHA-256
+// lists are those of the offered records, so every option belongs to one.
+// A record prepared from a SHA-256 the catalog has since replaced is not
+// offered; a note asks to prepare it again. Without the executor's answer
+// the wizard offers no template.
 func (h *Handler) wizardImages(ctx context.Context, d *deployWizardData) {
 	v := h.loadPVEImages(ctx)
 	if !v.Available {
 		d.Notes = append(d.Notes, "The executor's image catalog is not available: no prepared template can be chosen.")
 		return
 	}
-	for _, img := range v.Images {
-		d.Images = append(d.Images, deployOption{Value: img.ID,
-			Label:    img.ID + " (" + img.OS + " " + img.Release + ", " + img.Arch + ")",
-			Selected: img.ID == d.Image})
-		d.Digests = append(d.Digests, deployOption{Value: img.SHA256, Label: img.SHA256 + " (" + img.ID + ")"})
-	}
+	seenImage, seenSHA := map[string]bool{}, map[string]bool{}
+	stale := 0
 	for _, t := range v.Templates {
-		if t.Remote == d.Remote && t.Node == d.Node {
-			d.Templates = append(d.Templates, deployOption{Value: strconv.FormatUint(t.VMID, 10), Label: templateOptionLabel(t)})
+		if t.Remote != d.Remote || t.Node != d.Node || (d.Storage != "" && t.Storage != d.Storage) {
+			continue
 		}
+		img, ok := v.catalogEntry(t)
+		if !ok {
+			stale++
+			continue
+		}
+		d.Templates = append(d.Templates, deployOption{Value: strconv.FormatUint(t.VMID, 10), Label: templateOptionLabel(t)})
+		if !seenImage[img.ID] {
+			seenImage[img.ID] = true
+			d.Images = append(d.Images, deployOption{Value: img.ID,
+				Label:    img.ID + " (" + img.OS + " " + img.Release + ", " + img.Arch + ")",
+				Selected: img.ID == d.Image})
+		}
+		if !seenSHA[img.SHA256] {
+			seenSHA[img.SHA256] = true
+			d.Digests = append(d.Digests, deployOption{Value: img.SHA256, Label: img.SHA256 + " (" + img.ID + ")"})
+		}
+	}
+	if stale > 0 {
+		d.Notes = append(d.Notes, strconv.Itoa(stale)+" template record(s) on this node were prepared from an image SHA-256 the catalog no longer lists and cannot be used: prepare it again on the Images page.")
+	}
+	if len(d.Templates) == 0 {
+		d.Notes = append(d.Notes, "No usable prepared template on this node and storage: prepare one on the Images page.")
 	}
 }
 
@@ -189,6 +274,9 @@ type DeployImagePreparer interface {
 const (
 	// maxImagePrepares bounds the preparations the page keeps in memory.
 	maxImagePrepares = 32
+	// maxImagePreparesPerUser bounds one user's share, so that one user's
+	// open proposals do not block everyone else's.
+	maxImagePreparesPerUser = 4
 	// imagePrepareTTL is how long a preparation stays on the page.
 	imagePrepareTTL = 2 * time.Hour
 	// maxImagePrepareForm bounds the preparation form's body.
@@ -243,17 +331,44 @@ type imagePrepares struct {
 
 func newImagePrepares() *imagePrepares { return &imagePrepares{m: map[string]*imagePrepare{}} }
 
-// put stores p after dropping expired entries; it refuses when full.
-func (s *imagePrepares) put(p *imagePrepare, now time.Time) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// roomLocked drops expired entries and refuses when the store or the user's
+// share of it is full. The caller holds s.mu.
+func (s *imagePrepares) roomLocked(user string, now time.Time) error {
+	mine := 0
 	for id, x := range s.m {
 		if now.After(x.Expires) {
 			delete(s.m, id)
+			continue
 		}
+		if x.User == user {
+			mine++
+		}
+	}
+	if mine >= maxImagePreparesPerUser {
+		return errors.New("you have too many open image preparations: run them or wait until they expire")
 	}
 	if len(s.m) >= maxImagePrepares {
 		return errors.New("too many open image preparations: wait until earlier ones expire")
+	}
+	return nil
+}
+
+// room reports whether user may store one more preparation now; it is
+// checked before the executor is asked for a proposal, so a full store
+// leaves no proposal behind there.
+func (s *imagePrepares) room(user string, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.roomLocked(user, now)
+}
+
+// put stores p after dropping expired entries; it refuses when the store or
+// the user's share is full.
+func (s *imagePrepares) put(p *imagePrepare, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.roomLocked(p.User, now); err != nil {
+		return err
 	}
 	s.m[p.ID] = p
 	return nil
@@ -377,6 +492,10 @@ func (h *Handler) handleImagePrepare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := webUser(r)
+	if err := h.imagePrepares.room(user, h.clockNow()); err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
 	resp, err := prep.ProposePVEImagePrepare(ctx, &pb.ProposePVEImagePrepareRequest{Spec: spec})
 	if err != nil {
 		h.guestPowerRefusal(w, "propose image prepare", err)
@@ -530,5 +649,5 @@ func (h *Handler) startImagePrepare(r *http.Request, prep DeployImagePreparer, p
 
 // templateOptionLabel is the wizard's label of a template record.
 func templateOptionLabel(t pveTemplateRow) string {
-	return fmt.Sprintf("%d · %s · %s · sha256 %s · generation %d", t.VMID, t.Image, t.Trust, t.SourceSHA256, t.Generation)
+	return fmt.Sprintf("%d · %s · %s · %s · sha256 %s · generation %d", t.VMID, t.Image, t.Storage, t.Trust, t.SourceSHA256, t.Generation)
 }

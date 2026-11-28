@@ -552,7 +552,9 @@ func TestDeployWizardPreselectsTargetAndSuggestsFreeAddress(t *testing.T) {
 		`<input type="hidden" name="profile_version" value="1">`,
 		// The profile's pool selects its network; .50 is reserved, so .51
 		// is the suggested free address.
-		`name="address" value="192.168.10.51"`, `<option value="9000">`,
+		`name="address" value="192.168.10.51"`,
+		`<option value="9000">9000 · debian-13 · local-lvm · signed · sha256 ` + dpImageSHA + ` · generation 1</option>`,
+		`<option value="debian-13" selected>`, `<option value="` + dpImageSHA + `">`,
 		`value="qemu-guest-agent" checked`, `value="harden@3" checked`,
 	} {
 		if !strings.Contains(body, want) {

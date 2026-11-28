@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -19,6 +21,8 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/middleware"
 )
 
 // PV-03h (ADR 0008 amendment 2, D4a/D4b): the Images page under /deploy and
@@ -416,5 +420,181 @@ func TestWizardProvisioningAfterPrepareEndsLikePi07(t *testing.T) {
 	}
 	if e.prov.commitCount() != 1 || e.prov.commits[0].GetSpec().GetTemplate().GetGeneration() != dpRecordGen {
 		t.Errorf("commits = %d, want one with generation %d", e.prov.commitCount(), dpRecordGen)
+	}
+}
+
+// TestWizardOffersNoRecordWithASupersededCatalogSHA: the catalog lists a
+// new SHA-256 for the image, the record was prepared from the old one. The
+// executor refuses such a record (BindTemplate compares it with the catalog),
+// so the wizard offers neither its VMID nor a SHA-256 and says it must be
+// prepared again; a form with the old or new values is refused before the
+// executor.
+func TestWizardOffersNoRecordWithASupersededCatalogSHA(t *testing.T) {
+	e := newDPEnv(t)
+	newSHA := strings.Repeat("ef", 32)
+	e.prov.images = dpImagesDefault()
+	e.prov.images.Images[0].Image.Sha256 = newSHA
+	_, body, _ := e.do(t, http.MethodGet, "/deployments/new?remote=pve-lab&node=p1&profile=web_s", "", "")
+	if strings.Contains(body, `<option value="9000"`) {
+		t.Error("the wizard offers a record whose SHA-256 the catalog no longer lists")
+	}
+	if strings.Contains(body, `<option value="`+dpImageSHA+`"`) || strings.Contains(body, `<option value="`+newSHA+`"`) {
+		t.Error("the wizard offers a SHA-256 that no offered record was prepared from")
+	}
+	if strings.Contains(body, `<option value="debian-13"`) {
+		t.Error("the wizard offers an image without a bindable record")
+	}
+	if !strings.Contains(body, "prepare it again") {
+		t.Error("the wizard does not say that the template must be prepared again")
+	}
+	// One environment per attempt: the propose rate limit counts attempts.
+	for _, sha := range []string{dpImageSHA, newSHA} {
+		e := newDPEnv(t)
+		e.prov.images = dpImagesDefault()
+		e.prov.images.Images[0].Image.Sha256 = newSHA
+		f := dpForm()
+		f.Set("template_sha256", sha)
+		if code, b, _ := e.do(t, http.MethodPost, "/deployments/propose", gpFormCT, f.Encode()); code != http.StatusBadRequest {
+			t.Errorf("propose with sha %s = %d %q, want 400", sha[:4], code, b)
+		}
+		if len(e.prov.proposed) != 0 {
+			t.Error("a record with a superseded SHA-256 reached the executor")
+		}
+	}
+}
+
+// TestWizardLeavesOutRecordsOfOtherTargets: records of another node, another
+// remote, another storage than the profile's, or an image the catalog does
+// not list are not offered; only the record of the target is.
+func TestWizardLeavesOutRecordsOfOtherTargets(t *testing.T) {
+	e := newDPEnv(t)
+	r := dpImagesDefault()
+	base := r.Templates[0]
+	add := func(vmid uint64, edit func(*pb.PVETemplateRecord)) {
+		c := &pb.PVETemplateRecord{RemoteId: base.RemoteId, Node: base.Node, Storage: base.Storage, ImageId: base.ImageId,
+			Trust: base.Trust, Vmid: vmid, Generation: 1, SourceSha256: base.SourceSha256}
+		edit(c)
+		r.Templates = append(r.Templates, c)
+	}
+	add(9101, func(c *pb.PVETemplateRecord) { c.Node = "p2" })
+	add(9102, func(c *pb.PVETemplateRecord) { c.RemoteId = "pve-other" })
+	add(9103, func(c *pb.PVETemplateRecord) { c.Storage = "other-pool" })
+	add(9104, func(c *pb.PVETemplateRecord) { c.ImageId = "fedora-41" })
+	e.prov.images = r
+	_, body, _ := e.do(t, http.MethodGet, "/deployments/new?remote=pve-lab&node=p1&profile=web_s", "", "")
+	if !strings.Contains(body, `<option value="9000">`) {
+		t.Error("the wizard does not offer the target's record")
+	}
+	for _, v := range []string{"9101", "9102", "9103", "9104"} {
+		if strings.Contains(body, `value="`+v+`"`) {
+			t.Errorf("the wizard offers record %s of another target", v)
+		}
+	}
+	if strings.Contains(body, `value="fedora-41"`) {
+		t.Error("the wizard offers an image that is not in the catalog")
+	}
+}
+
+// TestWizardTemplateLabelShowsTheRecord: the template choice is labelled
+// with the record's VMID, image, storage, trust, SHA-256 and generation.
+func TestWizardTemplateLabelShowsTheRecord(t *testing.T) {
+	e := newDPEnv(t)
+	e.prov.images = withRecord(func(r *pb.PVETemplateRecord) { r.Generation = dpRecordGen })
+	_, body, _ := e.do(t, http.MethodGet, "/deployments/new?remote=pve-lab&node=p1&profile=web_s", "", "")
+	want := `<option value="9000">9000 · debian-13 · local-lvm · signed · sha256 ` + dpImageSHA + ` · generation 2</option>`
+	if !strings.Contains(body, want) {
+		t.Errorf("wizard lacks %s", want)
+	}
+}
+
+// TestImagesAnswerOverLimitsIsNotAvailable: an executor answer with too many
+// entries or records, or with an overlong or non-UTF-8 string, is not shown
+// and the wizard offers no template from it.
+func TestImagesAnswerOverLimitsIsNotAvailable(t *testing.T) {
+	cases := map[string]func(*pb.ListPVEImagesResponse){
+		"too many images": func(r *pb.ListPVEImagesResponse) {
+			for range 256 {
+				r.Images = append(r.Images, r.Images[0])
+			}
+		},
+		"too many records": func(r *pb.ListPVEImagesResponse) {
+			for range 1024 {
+				r.Templates = append(r.Templates, r.Templates[0])
+			}
+		},
+		"overlong url":   func(r *pb.ListPVEImagesResponse) { r.Images[0].Image.Url = dpCatalogURL + strings.Repeat("a", 2048) },
+		"overlong node":  func(r *pb.ListPVEImagesResponse) { r.Templates[0].Node = strings.Repeat("n", 2049) },
+		"non-utf8 os":    func(r *pb.ListPVEImagesResponse) { r.Images[0].Image.Os = "deb\xffian" },
+		"non-utf8 trust": func(r *pb.ListPVEImagesResponse) { r.Templates[0].Trust = "\xc3" },
+	}
+	for name, edit := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newDPEnv(t)
+			r := dpImagesDefault()
+			edit(r)
+			e.prov.images = r
+			_, body, _ := e.do(t, http.MethodGet, "/deploy/images", "", "")
+			if !strings.Contains(body, "Not available") || strings.Contains(body, dpRecordExec) {
+				t.Error("an answer over the limits is shown")
+			}
+			_, body, _ = e.do(t, http.MethodGet, "/deployments/new?remote=pve-lab&node=p1&profile=web_s", "", "")
+			if strings.Contains(body, `<option value="9000"`) {
+				t.Error("the wizard offers a template from an answer over the limits")
+			}
+		})
+	}
+}
+
+// TestImagesPreparationsAreBoundedPerUser: one user's open preparations do
+// not block another user's, and a preparation over the user's limit is
+// refused before the executor is asked for a proposal.
+func TestImagesPreparationsAreBoundedPerUser(t *testing.T) {
+	e := newDPEnv(t)
+	sessions := auth.NewStore(e.db, time.Now)
+	a, err := auth.New(auth.Options{Executor: pveFakeExec{}, Sessions: sessions, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(middleware.Handler(middleware.Options{PublicOrigin: gpOrigin}, a.Wrap(e.h)))
+	t.Cleanup(srv.Close)
+	login := func(user string) *http.Cookie {
+		token, _, err := sessions.Create(context.Background(), "cred-"+user, user)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &http.Cookie{Name: auth.CookieName, Value: token}
+	}
+	prepare := func(c *http.Cookie) int {
+		req, err := http.NewRequest(http.MethodPost, srv.URL+"/deploy/images/prepare", strings.NewReader(dpPrepareForm().Encode()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.AddCookie(c)
+		req.Header.Set("Origin", gpOrigin)
+		req.Header.Set("Content-Type", gpFormCT)
+		client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		res, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		_, _ = io.Copy(io.Discard, res.Body)
+		return res.StatusCode
+	}
+	alice, bob := login("alice"), login("bob")
+	const perUser = 4
+	for i := range perUser {
+		if code := prepare(alice); code != http.StatusSeeOther {
+			t.Fatalf("alice prepare %d = %d", i, code)
+		}
+	}
+	if code := prepare(alice); code != http.StatusServiceUnavailable {
+		t.Errorf("alice prepare over her limit = %d, want 503", code)
+	}
+	if p, _, _ := e.prov.prepCounts(); p != perUser {
+		t.Errorf("executor proposals = %d, want %d: a refused preparation reached the executor", p, perUser)
+	}
+	if code := prepare(bob); code != http.StatusSeeOther {
+		t.Errorf("bob prepare = %d: alice's preparations block other users", code)
 	}
 }

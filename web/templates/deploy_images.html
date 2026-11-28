@@ -5,7 +5,7 @@
   <h2>Image catalog</h2>
   <p class="hint">Read-only view of the executor's image catalog: the signed entries from the release bundle and the local entries. A template can be provisioned only after the image was prepared into a template record (listed below). Catalog text comes from the executor and is shown as text; only https links are clickable.</p>
   {{if not $d.View.Available}}
-  <p class="status status--warning">Not available: the executor did not answer. Nothing is shown as prepared or as missing until it answers again.</p>
+  <p class="status status--warning">Not available: the executor did not answer, or its answer was over the page's size limits. Nothing is shown as prepared or as missing until it answers again.</p>
   {{else}}
   <p class="hint">Catalog sequence <span class="mono">{{$d.View.CatalogSequence}}</span>{{if $d.View.CatalogDigest}}, digest <span class="mono">{{$d.View.CatalogDigest}}</span>{{end}}{{if eq $d.View.CatalogSequence 0}} (no signed catalog is loaded){{end}}.</p>
   {{if $d.View.Images}}
@@ -36,7 +36,7 @@
 </section>
 <section class="panel" aria-label="Prepared templates">
   <h2>Prepared templates</h2>
-  <p class="hint">Template records the executor wrote when an image was prepared. The new deployment wizard offers exactly these records for its node; the VMID, generation and SHA-256 shown here are the ones a deployment binds.</p>
+  <p class="hint">Template records the executor wrote when an image was prepared. The new deployment wizard offers these records for its node and storage when the catalog still lists the SHA-256 they were prepared from; a record whose SHA-256 the catalog has replaced must be prepared again. The VMID, generation and SHA-256 shown here are the ones a deployment binds.</p>
   {{if $d.View.Available}}
   {{if $d.View.Templates}}
   <div class="table-wrap">
