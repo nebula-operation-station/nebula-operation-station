@@ -229,9 +229,14 @@ func (d *vulnDecider) apply(ctx context.Context, user string, dec ui.VulnDecisio
 		if view.RunID == "" || view.RunID != dec.RunID {
 			return fmt.Errorf("mark reset %s: the latest regressed run changed: %w", dec.SourceID, vulnstore.ErrResetRefused)
 		}
-		_, err = d.v.store.ResetMark(ctx, vulnstore.MarkResetRequest{SourceID: dec.SourceID, RunID: dec.RunID,
+		m, err := d.v.store.ResetMark(ctx, vulnstore.MarkResetRequest{SourceID: dec.SourceID, RunID: dec.RunID,
 			ContentDate: view.ReportedDate, Sequence: view.ReportedSeq, Admin: user, Reason: dec.Reason}, d.audit)
-		return err
+		if err != nil {
+			return err
+		}
+		// Once per applied reset, and only after it committed (ADR 0011 D5).
+		d.v.enqueue("mark_reset", func(ctx context.Context) { d.v.notifier.MarkReset(ctx, m) })
+		return nil
 	default:
 		return fmt.Errorf("decision kind %q: %w", dec.Kind, vulnstore.ErrInvalidInput)
 	}

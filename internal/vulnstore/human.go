@@ -189,10 +189,15 @@ type Reopened struct {
 // KEV-listed, and every accepted_risk or false_positive finding whose
 // version basis changed or became unknown (D6). It is a NOS-side review,
 // never part of a run; the store does not call it by itself. The server
-// does not call it yet: it needs NOS's version basis from the package
-// inventory, which the server does not store yet, and no human state can
-// be set before the decision assertion exists (see cmd/nebula-server
-// vuln.go). It is to be called periodically once both exist.
+// calls it on every sweep (cmd/nebula-server vuln.go sweepOnce) with NOS's
+// own version basis.
+//
+// A basis that cannot be judged because of an error (basis returns a non-nil
+// error, e.g. a transient inventory read failure) is not "basis unknown": the
+// finding keeps its human state in this review, and the error is returned
+// joined with the others. The rest of the review still runs; the next sweep
+// checks the finding again. Only known=false without an error re-opens with
+// basis_unknown.
 func (s *Store) ReviewHumanStates(ctx context.Context, basis BasisFunc) ([]Reopened, error) {
 	now := s.now().UTC()
 	s.mu.Lock()
@@ -202,7 +207,10 @@ func (s *Store) ReviewHumanStates(ctx context.Context, basis BasisFunc) ([]Reope
 	if err != nil {
 		return nil, err
 	}
-	var out []Reopened
+	var (
+		out      []Reopened
+		basisErr []error
+	)
 	for _, f := range list {
 		var reason ReopenReason
 		switch {
@@ -213,7 +221,10 @@ func (s *Store) ReviewHumanStates(ctx context.Context, basis BasisFunc) ([]Reope
 		default:
 			v, known, err := basis(ctx, f)
 			switch {
-			case err != nil || !known:
+			case err != nil:
+				basisErr = append(basisErr, fmt.Errorf("basis of %s: %w", f.Key.String(), err))
+				continue
+			case !known:
 				reason = ReopenBasisUnknown
 			case v != f.Human.BasisVersion:
 				reason = ReopenBasisChanged
@@ -230,7 +241,7 @@ func (s *Store) ReviewHumanStates(ctx context.Context, basis BasisFunc) ([]Reope
 			out = append(out, Reopened{Key: f.Key, Reason: reason})
 		}
 	}
-	return out, nil
+	return out, errors.Join(basisErr...)
 }
 
 func (s *Store) reopenHuman(ctx context.Context, f Finding, now time.Time) (bool, error) {
