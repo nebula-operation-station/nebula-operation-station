@@ -48,7 +48,7 @@ before anything is spooled.
 | Read leases and live values | Available | `/leases`, `/pve/<id>` |
 | Deploy profiles (saved presets; nothing is deployed from them today) | Available | `/deploy` |
 | Image preparation and guest provisioning | **Available, with a gap:** prepare a template on the Images page, then provision from the wizard; cloning may need a token privilege the action token can lack | [Guest provisioning](#guest-provisioning) |
-| Guest power: start, graceful shutdown, hard stop | **Available:** Power section on the chart; each action is proposed, then approved on its proposal page | `/pve/<id>` chart, `/pve/guests/power/<digest>` (proposal) |
+| Guest power: start, graceful shutdown, hard stop | **Available:** Power section on the inventory chart; each action is proposed, then approved on its proposal page | `/inventory/chart` (Power section), `/pve/guests/power/<digest>` (proposal) |
 | Guest snapshots: create, delete, rollback | **Available:** each action is proposed, then approved on its proposal page | `/pve/guests/snapshots` |
 | Guest backup, intra-cluster migration, node reboot | **Not available:** executor code only, no RPC, page or CLI command | none |
 | Guest configuration changes | **Planned** | none |
@@ -59,8 +59,11 @@ Backup, migration and node reboot remain open work under ADR 0006 phase 2.
 
 **Guest power and snapshots.** `nebula-server` sets both actions
 (`cmd/nebula-server/main.go:643-644`), the routes are mounted
-(`internal/web/ui/ui.go:727-735`), and the chart renders the Power section of
-each guest when the action is set (`internal/web/ui/ui.go:1087`). Each action
+(`internal/web/ui/ui.go:727-735`), and the inventory chart (`/inventory/chart`)
+builds the Power section only for the chart page with PVE nodes:
+`if data.Content == "chart" && data.Chart != nil && len(data.Chart.PVENodes) > 0`
+(`internal/web/ui/ui.go:1086`). The PVE detail page `/pve/<id>` does not
+show it. Each action
 is proposed, shown with the executor's binding and risk, then approved on its
 proposal page and run. The `nebula` CLI has no power or snapshot command of
 its own. (Previously: "not available, the routes answer 404".)
@@ -630,16 +633,20 @@ the chart's nodes of active remotes is a second way into the wizard.
 **Missing or invalid catalog.** If the signed catalog is missing, its
 signature does not verify, or it is older than the one loaded before, the
 executor still starts but loads no signed catalog, and the failure is written
-to the audit log. The executor then lists only the local entries
-(`internal/executor/pve_images.go:360`, `internal/executor/pve_images_local.go:380`).
-A signed image is refused as not in the catalog, and the wizard offers no
-template for it. Local entries keep working on the Images page and in the
-wizard. The messages "nothing can be prepared" and "no prepared template can be
+to the audit log. The list call still succeeds: `CatalogListing` skips the
+signed entries and returns the local ones (`internal/executor/pve_images.go:360`),
+so the Images page stays available and local entries keep working there and in
+the wizard. A signed image is refused when you propose its preparation with
+"image is not in the catalog" (`ErrPveImageUnknown`, `internal/executor/pve_images.go:576-578`),
+and the wizard offers no template built from it: the record is counted as
+prepared from an image the catalog no longer lists (`internal/web/ui/deploy_images.go:238-255`).
+The messages "nothing can be prepared" and "no prepared template can be
 chosen" (`internal/web/ui/deploy_images.go:476`, `deploy_images.go:229`) appear
 only when the executor's list call fails, its answer is refused
 (`internal/web/ui/deploy_images.go:143-151`) or the server has no image
-capability (`internal/web/ui/deploy_images.go:138-141`). Nothing is persisted on these
-paths. Fix the release bundle and restart the executor.
+capability (`internal/web/ui/deploy_images.go:138-141`); they do not mean a
+missing catalog. Nothing is persisted on these paths. Fix the release bundle
+and restart the executor.
 
 **Preparing again.** A template that is gone from PVE, changed outside NOS, or
 prepared for a remote that was re-pinned is prepared again: propose and approve
