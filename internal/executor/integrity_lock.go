@@ -324,8 +324,9 @@ var integrityLockedMethods = map[string]bool{
 	pb.ExecutorService_ReadPVE_FullMethodName:             true,
 	pb.ExecutorService_ReadNetDevice_FullMethodName:       true,
 	pb.ExecutorService_ReadPrivateRegistry_FullMethodName: true,
-	// Local image entries: offen laut ADR 0008 Amendment 2 I1, fail-safe
-	// bis Maintainer-Entscheidung (Wächter 26.11.).
+	// Local image entries: locked, decided by the maintainer on 2026-11-28
+	// (ADR 0008 amendment 2 I1): a local entry widens what a later commit
+	// may download while the lab is locked.
 	pb.ExecutorService_AddPVELocalImage_FullMethodName:    true,
 	pb.ExecutorService_RemovePVELocalImage_FullMethodName: true,
 
